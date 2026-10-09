@@ -71,6 +71,20 @@ describe('MCP filesystem boundaries', () => {
     expect(result.isError).toBe(true);
   });
 
+  it('checks normalized path aliases and script path arrays', async () => {
+    const requests = [
+      { name: 'write_file', arguments: { project_path: project, file_path: 'escape/secret.txt', content: 'changed' } },
+      { name: 'validate_scripts', arguments: { project_path: project, script_paths: [join(outside, 'script.gd')] } },
+      { name: 'export_project', arguments: { project_path: project, output_path: join(outside, 'export.exe'), preset_name: 'Windows' } }
+    ];
+    for (const request of requests) {
+      const result = await client.callTool(request);
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.content)).toContain('outside');
+    }
+    expect(readFileSync(join(outside, 'secret.txt'), 'utf8')).toBe('original');
+  });
+
   it('provides items for every array in every advertised schema', async () => {
     const { tools } = await client.listTools();
     expect(tools).toHaveLength(157);

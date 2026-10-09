@@ -590,7 +590,10 @@ CI runs on Node.js 22 and 24 without publishing packages or deploying services.
 Tests include real MCP requests over the SDK's in-memory transport, filesystem
 boundary checks, symbolic link escapes, project scaffolding, schema validation
 and cursor pagination. Running an actual Godot project remains an integration
-check that requires an installed engine and a test project.
+check that requires an installed engine. Set `GODOT_SMOKE_PATH` to the full path
+of its console executable to enable the temporary-project headless smoke test.
+It creates a project, creates and edits a scene, reads it through MCP, and saves
+a second scene. The test removes its temporary files afterward.
 
 ## Architecture
 
