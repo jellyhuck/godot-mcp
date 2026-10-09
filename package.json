@@ -39,6 +39,7 @@
     "inspector": "npx @modelcontextprotocol/inspector build/index.js",
     "prepare": "npm run build",
     "watch": "tsc --watch",
+    "pretest": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest"
   },

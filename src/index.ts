@@ -59,6 +59,14 @@ const execFileAsync = promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
+function isCliEntry(entryPath: string | undefined): boolean {
+  try {
+    return !!entryPath && realpathSync(entryPath) === realpathSync(__filename);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Interface representing a running Godot process
  */
@@ -7129,7 +7137,7 @@ export class GodotServer {
 }
 
 // Create and run the server
-if (process.argv[1] && existsSync(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(__filename)) {
+if (isCliEntry(process.argv[1])) {
   const server = new GodotServer();
   server.run().catch((error: unknown) => {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';

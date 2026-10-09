@@ -582,11 +582,11 @@ remains the version specified in `package.json`.
 ```bash
 npm ci
 npm test
-npm run build
 npm audit --audit-level=moderate
 ```
 
 CI runs on Node.js 22 and 24 without publishing packages or deploying services.
+`npm test` builds the server first so executable-entry tests use current code.
 Tests include real MCP requests over the SDK's in-memory transport, filesystem
 boundary checks, symbolic link escapes, project scaffolding, schema validation
 and cursor pagination. Running an actual Godot project remains an integration
