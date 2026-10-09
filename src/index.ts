@@ -8,7 +8,7 @@
  */
 
 import { fileURLToPath } from 'url';
-import { join, dirname, basename, normalize, resolve, relative, isAbsolute } from 'path';
+import { join, dirname, basename, normalize, resolve, relative } from 'path';
 import { existsSync, readdirSync, readFileSync, writeFileSync, copyFileSync, unlinkSync, mkdirSync, renameSync } from 'fs';
 import { spawn, execFile } from 'child_process';
 import { promisify } from 'util';
@@ -22,6 +22,8 @@ import {
   ListToolsRequestSchema,
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
+import { isPathWithinAllowedRoots, validateToolPaths } from './security.js';
+import { appendBoundedLines, readLogPage } from './logs.js';
 
 import {
   PARAMETER_MAPPINGS,
@@ -51,15 +53,6 @@ const ALLOWED_PROJECT_ROOTS: string[] = (process.env.GODOT_MCP_ALLOWED_DIRS || '
   .filter(p => p.length > 0)
   .map(p => resolve(p));
 
-function isPathWithinAllowedRoots(target: string): boolean {
-  if (ALLOWED_PROJECT_ROOTS.length === 0) return true;
-  const resolvedTarget = resolve(target);
-  return ALLOWED_PROJECT_ROOTS.some(root => {
-    const rel = relative(root, resolvedTarget);
-    return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
-  });
-}
-
 const execFileAsync = promisify(execFile);
 
 // Derive __filename and __dirname in ESM
@@ -73,6 +66,8 @@ interface GodotProcess {
   process: any;
   output: string[];
   errors: string[];
+  outputOffset: number;
+  errorOffset: number;
 }
 
 /**
@@ -100,7 +95,7 @@ interface GameConnection {
 /**
  * Main server class for the Godot MCP server
  */
-class GodotServer {
+export class GodotServer {
   private server: Server;
   private activeProcess: GodotProcess | null = null;
   private godotPath: string | null = null;
@@ -1253,6 +1248,7 @@ class GodotServer {
               },
               args: {
                 type: 'array',
+                items: {},
                 description: 'Optional array of arguments to pass to the method',
               },
             },
@@ -1526,7 +1522,7 @@ class GodotServer {
             properties: {
               nodePath: { type: 'string', description: 'Path to the node' },
               signalName: { type: 'string', description: 'Name of the signal to emit' },
-              args: { type: 'array', description: 'Optional arguments to pass with the signal' },
+              args: { type: 'array', items: {}, description: 'Optional arguments to pass with the signal' },
             },
             required: ['nodePath', 'signalName'],
           },
@@ -1680,7 +1676,10 @@ class GodotServer {
           description: 'Get new push_error/push_warning messages since last call',
           inputSchema: {
             type: 'object',
-            properties: {},
+            properties: {
+              cursor: { type: 'integer', minimum: 0, description: 'Optional absolute cursor from a previous response' },
+              limit: { type: 'integer', minimum: 1, maximum: 500, description: 'Maximum lines returned, defaults to 200' },
+            },
             required: [],
           },
         },
@@ -1689,7 +1688,10 @@ class GodotServer {
           description: 'Get new print output from the running game since last call',
           inputSchema: {
             type: 'object',
-            properties: {},
+            properties: {
+              cursor: { type: 'integer', minimum: 0, description: 'Optional absolute cursor from a previous response' },
+              limit: { type: 'integer', minimum: 1, maximum: 500, description: 'Maximum lines returned, defaults to 200' },
+            },
             required: [],
           },
         },
@@ -1966,7 +1968,7 @@ class GodotServer {
               action: { type: 'string', description: 'Action: set_cells, get_cell, erase_cells, get_used_cells' },
               x: { type: 'number', description: 'Cell X coordinate (for get_cell)' },
               y: { type: 'number', description: 'Cell Y coordinate (for get_cell)' },
-              cells: { type: 'array', description: 'Array of cell objects for set_cells/erase_cells' },
+              cells: { type: 'array', items: { type: 'object' }, description: 'Array of cell objects for set_cells/erase_cells' },
               sourceId: { type: 'number', description: 'Filter by source_id (for get_used_cells)' },
             },
             required: ['nodePath', 'action'],
@@ -2075,7 +2077,7 @@ class GodotServer {
               animationName: { type: 'string', description: 'Name for the new animation' },
               length: { type: 'number', description: 'Animation length in seconds. Default: 1.0' },
               loopMode: { type: 'number', description: '0=none, 1=linear, 2=pingpong' },
-              tracks: { type: 'array', description: 'Array of track definitions' },
+              tracks: { type: 'array', items: { type: 'object' }, description: 'Array of track definitions' },
               library: { type: 'string', description: 'Animation library name. Default: ""' },
             },
             required: ['nodePath', 'animationName'],
@@ -2265,7 +2267,7 @@ class GodotServer {
               nodePath: { type: 'string', description: 'Path to the node' },
               action: { type: 'string', description: 'Action: call, configure' },
               method: { type: 'string', description: 'Method name' },
-              args: { type: 'array', description: 'Arguments for the RPC call' },
+              args: { type: 'array', items: {}, description: 'Arguments for the RPC call' },
               mode: { type: 'string', description: 'RPC mode: any_peer, authority' },
               sync: { type: 'string', description: 'Sync mode: call_local, call_remote' },
               channel: { type: 'number', description: 'Transfer channel' },
@@ -2467,10 +2469,10 @@ class GodotServer {
             type: 'object',
             properties: {
               parentPath: { type: 'string', description: 'Parent node path' },
-              vertices: { type: 'array', description: 'Vertex positions [[x,y,z],...]' },
-              normals: { type: 'array', description: 'Vertex normals [[x,y,z],...]' },
-              uvs: { type: 'array', description: 'UV coordinates [[u,v],...]' },
-              indices: { type: 'array', description: 'Triangle indices [i0,i1,i2,...]' },
+              vertices: { type: 'array', items: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 }, description: 'Vertex positions [[x,y,z],...]' },
+              normals: { type: 'array', items: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 }, description: 'Vertex normals [[x,y,z],...]' },
+              uvs: { type: 'array', items: { type: 'array', items: { type: 'number' }, minItems: 2, maxItems: 2 }, description: 'UV coordinates [[u,v],...]' },
+              indices: { type: 'array', items: { type: 'integer' }, description: 'Triangle indices [i0,i1,i2,...]' },
               name: { type: 'string', description: 'Node name' },
             },
             required: ['parentPath', 'vertices'],
@@ -2568,7 +2570,7 @@ class GodotServer {
               parentPath: { type: 'string', description: 'Parent node path' },
               action: { type: 'string', description: 'Action: create, add_point, set_points, get_points' },
               nodePath: { type: 'string', description: 'Path3D node path (for add/set/get)' },
-              points: { type: 'array', description: 'Array of points [{x,y,z},...]' },
+              points: { type: 'array', items: { type: 'object' }, description: 'Array of points [{x,y,z},...]' },
               point: { type: 'object', description: 'Single point {x,y,z}' },
               name: { type: 'string', description: 'Node name' },
             },
@@ -2672,7 +2674,7 @@ class GodotServer {
               center: { type: 'object', description: 'Center point {x,y}' },
               radius: { type: 'number', description: 'Circle radius' },
               rect: { type: 'object', description: 'Rectangle {x,y,w,h}' },
-              points: { type: 'array', description: 'Polygon points [{x,y},...]' },
+              points: { type: 'array', items: { type: 'object' }, description: 'Polygon points [{x,y},...]' },
               position: { type: 'object', description: 'Text position {x,y} (baseline, for text)' },
               text: { type: 'string', description: 'Text to draw' },
               fontSize: { type: 'number', description: 'Text font size. Default: 16' },
@@ -2695,7 +2697,7 @@ class GodotServer {
               color: { type: 'object', description: 'Light color {r,g,b,a}' },
               energy: { type: 'number', description: 'Light energy' },
               range: { type: 'number', description: 'Light texture range' },
-              points: { type: 'array', description: 'Occluder polygon points [{x,y},...] (for create_occluder)' },
+              points: { type: 'array', items: { type: 'object' }, description: 'Occluder polygon points [{x,y},...] (for create_occluder)' },
               name: { type: 'string', description: 'Node name' },
             },
             required: ['action'],
@@ -2728,7 +2730,7 @@ class GodotServer {
             properties: {
               nodePath: { type: 'string', description: 'Path to Line2D/Polygon2D node' },
               action: { type: 'string', description: 'Action: add_point, set_points, clear, get_points' },
-              points: { type: 'array', description: 'Array of points [{x,y},...]' },
+              points: { type: 'array', items: { type: 'object' }, description: 'Array of points [{x,y},...]' },
               point: { type: 'object', description: 'Single point {x,y}' },
               width: { type: 'number', description: 'Line width' },
               color: { type: 'object', description: 'Color {r,g,b,a}' },
@@ -2745,7 +2747,7 @@ class GodotServer {
               action: { type: 'string', description: 'Action: create, add_point, set_points, get_points' },
               parentPath: { type: 'string', description: 'Parent node path (for create)' },
               nodePath: { type: 'string', description: 'Path2D node path' },
-              points: { type: 'array', description: 'Array of points [{x,y},...]' },
+              points: { type: 'array', items: { type: 'object' }, description: 'Array of points [{x,y},...]' },
               point: { type: 'object', description: 'Single point {x,y}' },
               name: { type: 'string', description: 'Node name' },
             },
@@ -2923,7 +2925,7 @@ class GodotServer {
               scriptPath: { type: 'string', description: 'Script file path (relative to project)' },
               extends: { type: 'string', description: 'Base class to extend. Default: Node' },
               className: { type: 'string', description: 'Optional class_name' },
-              methods: { type: 'array', description: 'Method stubs to include' },
+              methods: { type: 'array', items: { type: 'string' }, description: 'Method stubs to include' },
               source: { type: 'string', description: 'Full source code (overrides template)' },
             },
             required: ['projectPath', 'scriptPath'],
@@ -3310,6 +3312,13 @@ class GodotServer {
     // Handle tool calls
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
       this.logDebug(`Handling tool request: ${request.params.name}`);
+      try {
+        const args = normalizeParameters(request.params.arguments || {});
+        const pathError = validateToolPaths(args, ALLOWED_PROJECT_ROOTS);
+        if (pathError) return createErrorResponse(pathError);
+      } catch (error: unknown) {
+        return createErrorResponse(`Unable to validate paths: ${error instanceof Error ? error.message : String(error)}`);
+      }
       switch (request.params.name) {
         case 'launch_editor':
           return await this.handleLaunchEditor(request.params.arguments);
@@ -3421,9 +3430,9 @@ class GodotServer {
           return await this.handleCreateDirectory(request.params.arguments);
         // Error/Log capture tools
         case 'game_get_errors':
-          return await this.handleGameGetErrors();
+          return await this.handleGameGetErrors(request.params.arguments);
         case 'game_get_logs':
-          return await this.handleGameGetLogs();
+          return await this.handleGameGetLogs(request.params.arguments);
         // Enhanced input tools
         case 'game_key_hold':
           return await this.handleGameKeyHold(request.params.arguments);
@@ -3736,7 +3745,7 @@ class GodotServer {
       );
     }
 
-    if (!isPathWithinAllowedRoots(args.projectPath)) {
+    if (!isPathWithinAllowedRoots(args.projectPath, ALLOWED_PROJECT_ROOTS)) {
       return createErrorResponse(
         `Project path is outside the allowed roots (GODOT_MCP_ALLOWED_DIRS): ${args.projectPath}`
       );
@@ -3774,10 +3783,13 @@ class GodotServer {
       const process = spawn(this.godotPath!, cmdArgs, { stdio: 'pipe' });
       const output: string[] = [];
       const errors: string[] = [];
+      const activeProcess: GodotProcess = { process, output, errors, outputOffset: 0, errorOffset: 0 };
+      this.lastLogIndex = 0;
+      this.lastErrorIndex = 0;
 
       process.stdout?.on('data', (data: Buffer) => {
         const lines = data.toString().split('\n');
-        output.push(...lines);
+        activeProcess.outputOffset += appendBoundedLines(output, lines);
         lines.forEach((line: string) => {
           if (line.trim()) this.logDebug(`[Godot stdout] ${line}`);
         });
@@ -3785,7 +3797,7 @@ class GodotServer {
 
       process.stderr?.on('data', (data: Buffer) => {
         const lines = data.toString().split('\n');
-        errors.push(...lines);
+        activeProcess.errorOffset += appendBoundedLines(errors, lines);
         lines.forEach((line: string) => {
           if (line.trim()) this.logDebug(`[Godot stderr] ${line}`);
         });
@@ -3810,7 +3822,7 @@ class GodotServer {
         }
       });
 
-      this.activeProcess = { process, output, errors };
+      this.activeProcess = activeProcess;
 
       // Start async TCP connection to the interaction server (fire-and-forget)
       this.connectToGame(args.projectPath).catch(err => {
@@ -3851,6 +3863,8 @@ class GodotServer {
             {
               output: this.activeProcess.output,
               errors: this.activeProcess.errors,
+              outputOffset: this.activeProcess.outputOffset,
+              errorOffset: this.activeProcess.errorOffset,
             },
             null,
             2
@@ -5134,20 +5148,28 @@ class GodotServer {
 
   // --- Error/Log capture handlers ---
 
-  private async handleGameGetErrors() {
+  private async handleGameGetErrors(args: any = {}) {
     if (!this.activeProcess)
       return createErrorResponse('No active Godot process. Use run_project first.');
-    const errors = this.activeProcess.errors.slice(this.lastErrorIndex);
-    this.lastErrorIndex = this.activeProcess.errors.length;
-    return { content: [{ type: 'text', text: JSON.stringify({ count: errors.length, errors }, null, 2) }] };
+    try {
+      const { lines: errors, ...page } = readLogPage(this.activeProcess.errors, this.activeProcess.errorOffset, args.cursor ?? this.lastErrorIndex, args.limit ?? 200);
+      this.lastErrorIndex = page.nextCursor;
+      return { content: [{ type: 'text', text: JSON.stringify({ count: errors.length, errors, ...page }, null, 2) }] };
+    } catch (error: unknown) {
+      return createErrorResponse(error instanceof Error ? error.message : String(error));
+    }
   }
 
-  private async handleGameGetLogs() {
+  private async handleGameGetLogs(args: any = {}) {
     if (!this.activeProcess)
       return createErrorResponse('No active Godot process. Use run_project first.');
-    const logs = this.activeProcess.output.slice(this.lastLogIndex);
-    this.lastLogIndex = this.activeProcess.output.length;
-    return { content: [{ type: 'text', text: JSON.stringify({ count: logs.length, logs }, null, 2) }] };
+    try {
+      const { lines: logs, ...page } = readLogPage(this.activeProcess.output, this.activeProcess.outputOffset, args.cursor ?? this.lastLogIndex, args.limit ?? 200);
+      this.lastLogIndex = page.nextCursor;
+      return { content: [{ type: 'text', text: JSON.stringify({ count: logs.length, logs, ...page }, null, 2) }] };
+    } catch (error: unknown) {
+      return createErrorResponse(error instanceof Error ? error.message : String(error));
+    }
   }
 
   // --- Enhanced input handlers ---
@@ -5212,14 +5234,14 @@ class GodotServer {
         return createErrorResponse('A project.godot already exists at this path.');
       const isDotnet = args.dotnet === true;
       const assemblyName = toDotnetIdentifier(args.projectName);
-      const features = generateGodotProjectFeatures(isDotnet);
+      const sdkVersion = (await this.detectGodotNetSdkVersion()) ?? undefined;
+      const features = generateGodotProjectFeatures(isDotnet, sdkVersion?.split('.').slice(0, 2).join('.'));
       let content = `; Engine configuration file.\n; Generated by Godot MCP.\n\nconfig_version=5\n\n[application]\n\nconfig/name="${args.projectName}"\nconfig/features=${features}\n`;
       if (isDotnet) {
         content += `\n[dotnet]\n\nproject/assembly_name="${assemblyName}"\n`;
       }
       writeFileSync(projectFile, content, 'utf8');
       if (isDotnet) {
-        const sdkVersion = (await this.detectGodotNetSdkVersion()) ?? undefined;
         writeFileSync(join(args.projectPath, `${assemblyName}.csproj`), generateCsprojContent(args.projectName, sdkVersion), 'utf8');
       }
       return { content: [{ type: 'text', text: `Project "${args.projectName}" created at ${args.projectPath}${isDotnet ? ' (Godot .NET / C#)' : ''}` }] };
@@ -5241,7 +5263,7 @@ class GodotServer {
       if (!this.godotPath) await this.detectGodotPath();
       if (!this.godotPath) return null;
       const { stdout } = await execFileAsync(this.godotPath, ['--version'], { timeout: 10000 });
-      const match = stdout.trim().match(/^(\d+)\.(\d+)(?:\.\d+)?\.stable\b/);
+      const match = stdout.trim().match(/^(\d+)\.(\d+)(?:\.\d+)?\b/);
       if (!match) return null;
       return `${match[1]}.${match[2]}.0`;
     } catch {
@@ -7107,9 +7129,11 @@ class GodotServer {
 }
 
 // Create and run the server
-const server = new GodotServer();
-server.run().catch((error: unknown) => {
-  const errorMessage = error instanceof Error ? error.message : 'Unknown error';
-  console.error('Failed to run server:', errorMessage);
-  process.exit(1);
-});
+if (process.argv[1] && resolve(process.argv[1]) === __filename) {
+  const server = new GodotServer();
+  server.run().catch((error: unknown) => {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    console.error('Failed to run server:', errorMessage);
+    process.exit(1);
+  });
+}

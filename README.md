@@ -557,7 +557,40 @@ The server listens on `127.0.0.1:9090` and accepts JSON commands over TCP when t
 |----------|-------------|
 | `GODOT_PATH` | Path to the Godot executable (overrides auto-detection) |
 | `DEBUG` | Set to `"true"` for detailed server-side logging |
-| `GODOT_MCP_ALLOWED_DIRS` | Optional. Restrict `run_project` to projects under these roots (`;`, `,`, or `:` separated). When unset, any project path is allowed. |
+| `GODOT_MCP_ALLOWED_DIRS` | Optional. Restrict all project tools, project discovery and export destinations to these roots. Use `;` or `,` on Windows, and `:` or `,` on other systems. Existing symbolic links are resolved before checking access. When unset, any project root is allowed. |
+
+File and scene paths must stay within their project directory, including paths
+under symbolic links. These checks cover MCP tool arguments. Runtime evaluation
+and generated scripts run with the Godot process account's permissions, so use a
+separate account or container when executing untrusted code.
+
+### Runtime log retention
+
+`game_get_logs` and `game_get_errors` accept optional `cursor` and `limit`
+arguments. The default page size is 200 lines, with a maximum of 500. Responses
+include `nextCursor`, `hasMore` and `dropped`. Pass `nextCursor` back to continue
+from the same position. Calls without a cursor continue from the previous call.
+Each stream retains the newest 2,000 lines, with at most 4,096 characters per line.
+If a cursor predates retained output, `dropped` is true. `get_debug_output` returns
+the retained streams and their starting offsets.
+
+### Contributor validation
+
+Development and CI require Node.js 22.12 or later. The server runtime requirement
+remains the version specified in `package.json`.
+
+```bash
+npm ci
+npm test
+npm run build
+npm audit --audit-level=moderate
+```
+
+CI runs on Node.js 22 and 24 without publishing packages or deploying services.
+Tests include real MCP requests over the SDK's in-memory transport, filesystem
+boundary checks, symbolic link escapes, project scaffolding, schema validation
+and cursor pagination. Running an actual Godot project remains an integration
+check that requires an installed engine and a test project.
 
 ## Architecture
 
