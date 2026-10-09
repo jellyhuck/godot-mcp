@@ -9,7 +9,7 @@
 
 import { fileURLToPath } from 'url';
 import { join, dirname, basename, normalize, resolve, relative } from 'path';
-import { existsSync, readdirSync, readFileSync, writeFileSync, copyFileSync, unlinkSync, mkdirSync, renameSync } from 'fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync, copyFileSync, unlinkSync, mkdirSync, renameSync, realpathSync } from 'fs';
 import { spawn, execFile } from 'child_process';
 import { promisify } from 'util';
 import { createConnection, Socket } from 'net';
@@ -7129,7 +7129,7 @@ export class GodotServer {
 }
 
 // Create and run the server
-if (process.argv[1] && resolve(process.argv[1]) === __filename) {
+if (process.argv[1] && existsSync(process.argv[1]) && realpathSync(process.argv[1]) === realpathSync(__filename)) {
   const server = new GodotServer();
   server.run().catch((error: unknown) => {
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
