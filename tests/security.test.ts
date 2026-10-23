@@ -1,11 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { appendBoundedLines, readLogPage } from '../src/logs.js';
-import { isPathWithinAllowedRoots, validateToolPaths } from '../src/security.js';
+import { isPathWithinAllowedRoots, validateEngineArgs, validateToolPaths, validateUserArgs } from '../src/security.js';
 
 describe('MCP filesystem boundaries', () => {
   const workspace = mkdtempSync(join(tmpdir(), 'godot-mcp-test-'));
@@ -85,6 +85,15 @@ describe('MCP filesystem boundaries', () => {
     expect(readFileSync(join(outside, 'secret.txt'), 'utf8')).toBe('original');
   });
 
+  it('rejects run_project engine flags that escape the project before side effects', async () => {
+    for (const engine_args of [['--path', outside], ['--main-pack', join(outside, 'game.pck')], [join(outside, 'project.godot')]]) {
+      const result = await client.callTool({ name: 'run_project', arguments: { project_path: project, engine_args } });
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result.content)).toContain('engineArgs');
+    }
+    expect(existsSync(join(project, 'mcp_interaction_server.gd'))).toBe(false);
+  });
+
   it('provides items for every array in every advertised schema', async () => {
     const { tools } = await client.listTools();
     expect(tools).toHaveLength(157);
@@ -128,5 +137,38 @@ describe('bounded runtime logs', () => {
   it('rejects invalid cursors and page sizes', () => {
     expect(() => readLogPage([], 0, -1)).toThrow('cursor');
     expect(() => readLogPage([], 0, 0, 501)).toThrow('limit');
+  });
+});
+
+describe('run_project argument validation', () => {
+  it('accepts allowlisted engine flags with and without values', () => {
+    expect(validateEngineArgs(undefined)).toBeNull();
+    expect(validateEngineArgs([])).toBeNull();
+    expect(validateEngineArgs(['--verbose', '--headless', '-w', '--resolution', '1280x720', '--rendering-method', 'gl_compatibility'])).toBeNull();
+  });
+
+  it('rejects flags that change the project, run mode or write files', () => {
+    for (const flag of ['--path', '--main-pack', '--script', '-s', '-e', '--editor', '--log-file', '--write-movie', '--export-release', '--remote-fs']) {
+      expect(validateEngineArgs([flag, 'value'])).toContain('not allowed');
+    }
+  });
+
+  it('rejects positional arguments, inline values and missing values', () => {
+    expect(validateEngineArgs(['other/project.godot'])).toContain('positional');
+    expect(validateEngineArgs(['--resolution', '1x1', 'res://main.tscn'])).toContain('positional');
+    expect(validateEngineArgs(['--resolution=1x1'])).toContain('not allowed');
+    expect(validateEngineArgs(['--resolution'])).toContain('requires a value');
+  });
+
+  it('rejects non-string engine arguments', () => {
+    expect(validateEngineArgs('--verbose')).toContain('array of strings');
+    expect(validateEngineArgs(['--verbose', 1])).toContain('array of strings');
+  });
+
+  it('accepts any strings as user arguments', () => {
+    expect(validateUserArgs(undefined)).toBeNull();
+    expect(validateUserArgs(['--path', '/elsewhere', 'level=2'])).toBeNull();
+    expect(validateUserArgs('--level')).toContain('array of strings');
+    expect(validateUserArgs([null])).toContain('array of strings');
   });
 });

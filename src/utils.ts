@@ -9,6 +9,8 @@ export interface OperationParams {
 
 export const PARAMETER_MAPPINGS: Record<string, string> = {
   'project_path': 'projectPath',
+  'engine_args': 'engineArgs',
+  'user_args': 'userArgs',
   'scene_path': 'scenePath',
   'root_node_type': 'rootNodeType',
   'parent_node_path': 'parentNodePath',

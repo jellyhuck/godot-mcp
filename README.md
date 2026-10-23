@@ -221,7 +221,7 @@ The original godot-mcp provided 20 tools for basic project management and scene 
 | Tool | Description |
 |------|-------------|
 | `launch_editor` | Launch Godot editor for a project |
-| `run_project` | Run a Godot project and capture output |
+| `run_project` | Run a Godot project and capture output, with optional `engineArgs` and `userArgs` |
 | `stop_project` | Stop the running project |
 | `get_debug_output` | Get console output and errors |
 | `get_godot_version` | Get installed Godot version |
@@ -563,6 +563,19 @@ File and scene paths must stay within their project directory, including paths
 under symbolic links. These checks cover MCP tool arguments. Runtime evaluation
 and generated scripts run with the Godot process account's permissions, so use a
 separate account or container when executing untrusted code.
+
+### Custom run flags
+
+`run_project` accepts two optional string arrays:
+
+- `engineArgs`: Godot engine flags inserted before `--path`, for example
+  `["--verbose", "--windowed", "--resolution", "1280x720"]`. Only display,
+  rendering, audio, debug-visualization and timing flags are allowed. Flags that
+  change the project, scene, run mode or write files (`--path`, `--main-pack`,
+  `--script`, `--editor`, `--log-file`, `--write-movie`, ...) and positional
+  arguments are rejected, so `GODOT_MCP_ALLOWED_DIRS` still applies.
+- `userArgs`: passed to the game after `--` and readable from GDScript with
+  `OS.get_cmdline_user_args()`, for example `["--level", "2"]`.
 
 ### Runtime log retention
 

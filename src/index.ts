@@ -22,7 +22,7 @@ import {
   ListToolsRequestSchema,
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
-import { isPathWithinAllowedRoots, validateToolPaths } from './security.js';
+import { isPathWithinAllowedRoots, validateEngineArgs, validateToolPaths, validateUserArgs } from './security.js';
 import { appendBoundedLines, readLogPage } from './logs.js';
 
 import {
@@ -857,6 +857,16 @@ export class GodotServer {
               scene: {
                 type: 'string',
                 description: 'Optional: Specific scene to run',
+              },
+              engineArgs: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Optional: Allowlisted engine flags, e.g. ["--verbose", "--windowed"]',
+              },
+              userArgs: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Optional: Game args after "--", read via OS.get_cmdline_user_args()',
               },
             },
             required: ['projectPath'],
@@ -3759,6 +3769,13 @@ export class GodotServer {
       );
     }
 
+    const argsError = validateEngineArgs(args.engineArgs) ?? validateUserArgs(args.userArgs);
+    if (argsError) {
+      return createErrorResponse(argsError);
+    }
+    const engineArgs: string[] = args.engineArgs ?? [];
+    const userArgs: string[] = args.userArgs ?? [];
+
     try {
       // Check if the project directory exists and contains a project.godot file
       const projectFile = join(args.projectPath, 'project.godot');
@@ -3781,13 +3798,16 @@ export class GodotServer {
       // Inject interaction server before launching
       this.injectInteractionServer(args.projectPath);
 
-      const cmdArgs = ['-d', '--path', args.projectPath];
+      const cmdArgs = ['-d', ...engineArgs, '--path', args.projectPath];
       if (args.scene && validatePath(args.scene)) {
         this.logDebug(`Adding scene parameter: ${args.scene}`);
         cmdArgs.push(args.scene);
       }
+      if (userArgs.length > 0) {
+        cmdArgs.push('--', ...userArgs);
+      }
 
-      this.logDebug(`Running Godot project: ${args.projectPath}`);
+      this.logDebug(`Running Godot project: ${args.projectPath} with args: ${JSON.stringify(cmdArgs)}`);
       const process = spawn(this.godotPath!, cmdArgs, { stdio: 'pipe' });
       const output: string[] = [];
       const errors: string[] = [];
@@ -3841,7 +3861,7 @@ export class GodotServer {
         content: [
           {
             type: 'text',
-            text: `Godot project started in debug mode. Use get_debug_output to see output. Game interaction server connecting on port ${this.INTERACTION_PORT}...`,
+            text: `Godot project started in debug mode${engineArgs.length || userArgs.length ? ` with extra arguments: ${JSON.stringify({ engineArgs, userArgs })}` : ''}. Use get_debug_output to see output. Game interaction server connecting on port ${this.INTERACTION_PORT}...`,
           },
         ],
       };
