@@ -912,7 +912,7 @@ export class GodotServer {
               engineArgs: {
                 type: 'array',
                 items: { type: 'string' },
-                description: 'Optional: Allowlisted engine flags, e.g. ["--verbose", "--windowed"]',
+                description: 'Optional: Allowlisted engine flags, e.g. ["--write-movie", "run.avi"]',
               },
               userArgs: {
                 type: 'array',
@@ -3824,7 +3824,7 @@ export class GodotServer {
       );
     }
 
-    const argsError = validateEngineArgs(args.engineArgs) ?? validateUserArgs(args.userArgs);
+    const argsError = validateEngineArgs(args.engineArgs, args.projectPath, ALLOWED_PROJECT_ROOTS) ?? validateUserArgs(args.userArgs);
     if (argsError) {
       return createErrorResponse(argsError);
     }

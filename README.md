@@ -577,10 +577,16 @@ separate account or container when executing untrusted code.
 
 - `engineArgs`: Godot engine flags inserted before `--path`, for example
   `["--verbose", "--windowed", "--resolution", "1280x720"]`. Only display,
-  rendering, audio, debug-visualization and timing flags are allowed. Flags that
-  change the project, scene, run mode or write files (`--path`, `--main-pack`,
-  `--script`, `--editor`, `--log-file`, `--write-movie`, ...) and positional
+  rendering, audio, debug-visualization, timing and movie-recording flags are
+  allowed. Flags that change the project, scene or run mode (`--path`,
+  `--main-pack`, `--script`, `--editor`, `--log-file`, ...) and positional
   arguments are rejected, so `GODOT_MCP_ALLOWED_DIRS` still applies.
+  `--write-movie <file>` is accepted when the file ends with `.avi` or `.png`
+  and resolves inside `GODOT_MCP_ALLOWED_DIRS`. Relative and `res://` paths are
+  resolved against the project directory, as Godot does; `user://` and other
+  URL schemes are rejected. Godot writes the `.wav` audio track and PNG frame
+  files next to the given file. Example:
+  `["--write-movie", "recordings/run.avi", "--fixed-fps", "60"]`.
 - `userArgs`: passed to the game after `--` and readable from GDScript with
   `OS.get_cmdline_user_args()`, for example `["--level", "2"]`.
 

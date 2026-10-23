@@ -1,5 +1,5 @@
 import { existsSync, realpathSync } from 'fs';
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'path';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'path';
 
 export function canonicalPath(target: string): string {
   let ancestor = resolve(target);
@@ -50,8 +50,9 @@ export function validateToolPaths(args: Record<string, unknown>, roots: string[]
 }
 
 // Godot engine flags allowed in run_project's engineArgs, mapped to whether they take a value.
-// Anything not listed (--path, --main-pack, --script, -e, --log-file, --write-movie, ...) is
-// rejected so callers cannot change the project, run mode or write files outside allowed roots.
+// Anything not listed (--path, --main-pack, --script, -e, --log-file, ...) is rejected so
+// callers cannot change the project, run mode or write files outside allowed roots.
+// --write-movie is allowed but its output path is checked against the allowed roots.
 const ALLOWED_ENGINE_FLAGS = new Map<string, boolean>([
   ['-v', false], ['--verbose', false], ['-q', false], ['--quiet', false], ['--no-header', false],
   ['--headless', false], ['-f', false], ['--fullscreen', false], ['-m', false], ['--maximized', false],
@@ -67,9 +68,33 @@ const ALLOWED_ENGINE_FLAGS = new Map<string, boolean>([
   ['--gpu-index', true], ['--text-driver', true], ['--tablet-driver', true], ['--xr-mode', true],
   ['--fixed-fps', true], ['--time-scale', true], ['--frame-delay', true], ['--max-fps', true],
   ['--audio-output-latency', true], ['--accessibility', true],
+  ['--write-movie', true],
 ]);
 
-export function validateEngineArgs(args: unknown): string | null {
+// Output formats Godot's MovieWriter can produce, selected by the --write-movie file extension.
+const MOVIE_EXTENSIONS = ['.avi', '.png'];
+
+// Validates the file passed to --write-movie. Godot resolves a relative path against res://,
+// so relative and res:// paths are resolved against the project; user:// and other schemes
+// point outside the project and are rejected. The resolved file (and therefore the .wav and
+// frame files Godot writes next to it) must be inside the allowed roots.
+export function validateWriteMoviePath(value: string, projectPath: string, roots: string[]): string | null {
+  if (!value || value.startsWith('-')) return 'engineArgs: flag "--write-movie" requires a file path.';
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(value) && !value.startsWith('res://')) {
+    return 'engineArgs: --write-movie path must be a filesystem or res:// path.';
+  }
+  const stripped = value.replace(/^res:\/\//, '');
+  if (!stripped || stripped.endsWith('/') || stripped.endsWith(sep)) return 'engineArgs: --write-movie path must name a file.';
+  if (!MOVIE_EXTENSIONS.includes(extname(stripped).toLowerCase())) {
+    return `engineArgs: --write-movie path must end with ${MOVIE_EXTENSIONS.join(' or ')}.`;
+  }
+  if (!isPathWithinAllowedRoots(resolve(projectPath, stripped), roots)) {
+    return 'engineArgs: --write-movie path is outside the allowed roots (GODOT_MCP_ALLOWED_DIRS).';
+  }
+  return null;
+}
+
+export function validateEngineArgs(args: unknown, projectPath?: string, roots: string[] = []): string | null {
   if (args === undefined) return null;
   if (!Array.isArray(args) || args.some(arg => typeof arg !== 'string')) return 'engineArgs must be an array of strings.';
   for (let i = 0; i < args.length; i++) {
@@ -78,6 +103,11 @@ export function validateEngineArgs(args: unknown): string | null {
     if (!ALLOWED_ENGINE_FLAGS.has(flag)) return `engineArgs: flag "${flag}" is not allowed.`;
     if (ALLOWED_ENGINE_FLAGS.get(flag)) {
       if (i + 1 >= args.length) return `engineArgs: flag "${flag}" requires a value.`;
+      if (flag === '--write-movie') {
+        if (projectPath === undefined) return 'engineArgs: --write-movie requires a project path.';
+        const movieError = validateWriteMoviePath(args[i + 1] as string, projectPath, roots);
+        if (movieError) return movieError;
+      }
       i++;
     }
   }

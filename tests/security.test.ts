@@ -5,7 +5,7 @@ import { tmpdir } from 'os';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { appendBoundedLines, readLogPage } from '../src/logs.js';
-import { isPathWithinAllowedRoots, validateEngineArgs, validateToolPaths, validateUserArgs } from '../src/security.js';
+import { isPathWithinAllowedRoots, validateEngineArgs, validateToolPaths, validateUserArgs, validateWriteMoviePath } from '../src/security.js';
 
 describe('MCP filesystem boundaries', () => {
   const workspace = mkdtempSync(join(tmpdir(), 'godot-mcp-test-'));
@@ -86,11 +86,12 @@ describe('MCP filesystem boundaries', () => {
   });
 
   it('rejects run_project engine flags that escape the project before side effects', async () => {
-    for (const engine_args of [['--path', outside], ['--main-pack', join(outside, 'game.pck')], [join(outside, 'project.godot')]]) {
+    for (const engine_args of [['--path', outside], ['--main-pack', join(outside, 'game.pck')], [join(outside, 'project.godot')], ['--write-movie', join(outside, 'run.avi')], ['--write-movie', '../../allowed-sibling/run.avi'], ['--write-movie', 'res://escape/run.avi'], ['--write-movie', 'user://run.avi']]) {
       const result = await client.callTool({ name: 'run_project', arguments: { project_path: project, engine_args } });
       expect(result.isError).toBe(true);
       expect(JSON.stringify(result.content)).toContain('engineArgs');
     }
+    expect(existsSync(join(outside, 'run.avi'))).toBe(false);
     expect(existsSync(join(project, 'mcp_interaction_server.gd'))).toBe(false);
     expect(readFileSync(join(project, 'project.godot'), 'utf8')).toBe('config_version=5\n');
   });
@@ -149,9 +150,49 @@ describe('run_project argument validation', () => {
   });
 
   it('rejects flags that change the project, run mode or write files', () => {
-    for (const flag of ['--path', '--main-pack', '--script', '-s', '-e', '--editor', '--log-file', '--write-movie', '--export-release', '--remote-fs']) {
+    for (const flag of ['--path', '--main-pack', '--script', '-s', '-e', '--editor', '--log-file', '--export-release', '--remote-fs']) {
       expect(validateEngineArgs([flag, 'value'])).toContain('not allowed');
     }
+  });
+
+  describe('--write-movie', () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'godot-mcp-movie-'));
+    const allowed = join(workspace, 'allowed');
+    const outside = join(workspace, 'allowed-sibling');
+    const project = join(allowed, 'project');
+    beforeAll(() => {
+      mkdirSync(project, { recursive: true });
+      mkdirSync(outside, { recursive: true });
+      symlinkSync(outside, join(project, 'escape'), process.platform === 'win32' ? 'junction' : 'dir');
+    });
+    afterAll(() => rmSync(workspace, { recursive: true, force: true }));
+
+    it('accepts movie files inside the allowed roots', () => {
+      for (const value of ['run.avi', 'recordings/frames.PNG', 'res://run.avi', join(project, 'run.avi'), join(allowed, 'other', 'run.avi')]) {
+        expect(validateEngineArgs(['--write-movie', value, '--fixed-fps', '60'], project, [allowed])).toBeNull();
+      }
+      expect(validateEngineArgs(['--write-movie', join(outside, 'run.avi')], project, [])).toBeNull();
+    });
+
+    it('rejects movie files outside the allowed roots, including traversal and symlinks', () => {
+      for (const value of [join(outside, 'run.avi'), '../../allowed-sibling/run.avi', 'res://../../allowed-sibling/run.avi', 'escape/run.avi', 'res://escape/run.avi']) {
+        expect(validateEngineArgs(['--write-movie', value], project, [allowed])).toContain('outside the allowed roots');
+      }
+    });
+
+    it('rejects non-file, unsupported and non-filesystem movie paths', () => {
+      expect(validateEngineArgs(['--write-movie'], project, [allowed])).toContain('requires a value');
+      expect(validateEngineArgs(['--write-movie', '--verbose'], project, [allowed])).toContain('requires a file path');
+      expect(validateEngineArgs(['--write-movie', ''], project, [allowed])).toContain('requires a file path');
+      expect(validateEngineArgs(['--write-movie', 'res://'], project, [allowed])).toContain('must name a file');
+      expect(validateEngineArgs(['--write-movie', 'recordings/'], project, [allowed])).toContain('must name a file');
+      expect(validateEngineArgs(['--write-movie', 'run.mp4'], project, [allowed])).toContain('must end with .avi or .png');
+      expect(validateEngineArgs(['--write-movie', 'run'], project, [allowed])).toContain('must end with .avi or .png');
+      expect(validateEngineArgs(['--write-movie', 'user://run.avi'], project, [allowed])).toContain('filesystem or res://');
+      expect(validateEngineArgs(['--write-movie', 'file:///tmp/run.avi'], project, [allowed])).toContain('filesystem or res://');
+      expect(validateEngineArgs(['--write-movie', 'run.avi'])).toContain('requires a project path');
+      expect(validateWriteMoviePath('run.avi', project, [outside])).toContain('outside the allowed roots');
+    });
   });
 
   it('rejects positional arguments, inline values and missing values', () => {
