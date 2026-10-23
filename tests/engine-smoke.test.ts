@@ -1,5 +1,5 @@
 import { expect, it } from 'vitest';
-import { mkdtempSync, readFileSync, rmSync } from 'fs';
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -36,6 +36,53 @@ it.skipIf(!process.env.GODOT_SMOKE_PATH)('creates, edits, reads and saves a scen
     await call('save_scene', { projectPath, scenePath: 'main.tscn', newPath: 'saved.tscn' });
     expect(readFileSync(join(projectPath, 'saved.tscn'), 'utf8')).toContain('Marker');
   } finally {
+    await client.close();
+    await instance.server.close();
+    for (const listener of addedListeners) process.removeListener('SIGINT', listener);
+    rmSync(workspace, { recursive: true, force: true });
+  }
+}, 120000);
+
+it.skipIf(!process.env.GODOT_SMOKE_PATH)('runs a project through the bootstrap without touching the project directory', async () => {
+  const workspace = mkdtempSync(join(tmpdir(), 'godot-engine-run-'));
+  const projectPath = join(workspace, 'project');
+  const listeners = process.listeners('SIGINT');
+  const instance: any = new GodotServer({ godotPath: process.env.GODOT_SMOKE_PATH });
+  const addedListeners = process.listeners('SIGINT').filter(listener => !listeners.includes(listener));
+  const client = new Client({ name: 'headless-run', version: '1.0.0' });
+  const [serverTransport, clientTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([instance.server.connect(serverTransport), client.connect(clientTransport)]);
+  async function call(name: string, args: Record<string, unknown>) {
+    const result = await client.callTool({ name, arguments: args });
+    expect(result.isError, JSON.stringify(result.content)).not.toBe(true);
+    return result;
+  }
+  try {
+    await call('create_project', { projectPath, projectName: 'RunSmoke' });
+    await call('create_scene', { projectPath, scenePath: 'main.tscn', rootNodeType: 'Node2D' });
+    await call('set_main_scene', { projectPath, scenePath: 'main.tscn' });
+    const projectBefore = readFileSync(join(projectPath, 'project.godot'), 'utf8');
+    const filesBefore = readdirSync(projectPath).sort();
+
+    await call('run_project', { projectPath, engineArgs: ['--headless'] });
+    const deadline = Date.now() + 60000;
+    while (!instance.gameConnection.connected && Date.now() < deadline) {
+      expect(instance.activeProcess, 'game exited before connecting').not.toBeNull();
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    expect(instance.gameConnection.connected).toBe(true);
+    expect(instance.gameConnection.port).not.toBe(9090);
+
+    const tree = await call('game_get_scene_tree', {});
+    const treeText = JSON.stringify(tree.content);
+    expect(treeText).toContain('McpInteractionServer');
+    expect(treeText).toContain('Node2D');
+
+    await call('stop_project', {});
+    expect(readFileSync(join(projectPath, 'project.godot'), 'utf8')).toBe(projectBefore);
+    expect(readdirSync(projectPath).sort()).toEqual(filesBefore);
+  } finally {
+    if (instance.activeProcess) instance.activeProcess.process.kill();
     await client.close();
     await instance.server.close();
     for (const listener of addedListeners) process.removeListener('SIGINT', listener);

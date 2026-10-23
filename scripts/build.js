@@ -14,23 +14,14 @@ try {
   // Ensure the build/scripts directory exists
   fs.ensureDirSync(path.join(__dirname, '..', 'build', 'scripts'));
   
-  // Copy the godot_operations.gd file
-  fs.copyFileSync(
-    path.join(__dirname, '..', 'src', 'scripts', 'godot_operations.gd'),
-    path.join(__dirname, '..', 'build', 'scripts', 'godot_operations.gd')
-  );
-  
-  // Copy the mcp_interaction_server.gd file
-  fs.copyFileSync(
-    path.join(__dirname, '..', 'src', 'scripts', 'mcp_interaction_server.gd'),
-    path.join(__dirname, '..', 'build', 'scripts', 'mcp_interaction_server.gd')
-  );
-
-  // Copy the validate_script.gd file
-  fs.copyFileSync(
-    path.join(__dirname, '..', 'src', 'scripts', 'validate_script.gd'),
-    path.join(__dirname, '..', 'build', 'scripts', 'validate_script.gd')
-  );
+  // Copy every GDScript the server launches Godot with
+  const scripts = ['godot_operations.gd', 'mcp_interaction_server.gd', 'mcp_bootstrap.gd', 'validate_script.gd'];
+  for (const script of scripts) {
+    fs.copyFileSync(
+      path.join(__dirname, '..', 'src', 'scripts', script),
+      path.join(__dirname, '..', 'build', 'scripts', script)
+    );
+  }
 
   console.log('Successfully copied scripts to build/scripts');
 } catch (error) {

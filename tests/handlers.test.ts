@@ -1008,7 +1008,8 @@ describe('Handler source structure', () => {
 
   it('run_project passes the interaction port to the game and discovers the bound port', () => {
     // The port is handed to Godot through the environment, never hardcoded
-    expect(sourceCode).toContain("env: { ...globalThis.process.env, [INTERACTION_PORT_ENV_VAR]: String(requestedPort) }");
+    expect(sourceCode).toContain("[INTERACTION_PORT_ENV_VAR]: String(requestedPort),");
+    expect(sourceCode).toContain("spawn(this.godotPath!, cmdArgs, { stdio: 'pipe', env: spawnEnv })");
     expect(sourceCode).not.toContain('INTERACTION_PORT = 9090');
     // The server learns the real port from the game's stdout announcement
     expect(sourceCode).toContain('parseInteractionPortAnnouncement(line)');
@@ -1017,6 +1018,33 @@ describe('Handler source structure', () => {
     expect(sourceCode).toContain("this.sendGameCommand('hello', {}, 5000)");
     // Tool argument validation
     expect(sourceCode).toContain('Invalid port: ${args.port}');
+  });
+
+  it('run_project never writes into the project directory', () => {
+    // The interaction server is attached by the bootstrap script from the
+    // build directory; no autoload injection, no copied script, no cleanup.
+    expect(sourceCode).not.toContain('injectInteractionServer');
+    expect(sourceCode).not.toContain('removeInteractionServer');
+    expect(sourceCode).not.toContain('interactionServerInjectedByUs');
+    expect(sourceCode).not.toContain('copyFileSync');
+    expect(sourceCode).toContain("cmdArgs.push('--script', this.bootstrapScriptPath);");
+    expect(sourceCode).toContain("join(__dirname, 'scripts', 'mcp_bootstrap.gd')");
+    // The scene reaches the bootstrap through the environment, not a positional arg
+    expect(sourceCode).toContain('spawnEnv[this.SCENE_ENV_VAR] = args.scene;');
+    // A late exit of a replaced process must not tear down the new run
+    expect(sourceCode).toMatch(/process\.on\('exit'[\s\S]*?if \(this\.activeProcess && this\.activeProcess\.process === process\) \{\s*this\.disconnectFromGame\(\);/);
+  });
+
+  it('bootstrap script attaches the interaction server and starts the scene', () => {
+    const gd = readFileSync(join(__dirname, '..', 'src', 'scripts', 'mcp_bootstrap.gd'), 'utf8');
+    expect(gd).toContain('extends SceneTree');
+    expect(gd).toContain('const AUTOLOAD_NAME: String = "McpInteractionServer"');
+    expect(gd).toContain('const SCENE_ENV_VAR: String = "GODOT_MCP_SCENE"');
+    expect(gd).toContain('ProjectSettings.has_setting("autoload/" + AUTOLOAD_NAME)');
+    expect(gd).toContain('.path_join(SERVER_SCRIPT)');
+    expect(gd).toContain('root.add_child(server)');
+    expect(gd).toContain('ProjectSettings.get_setting("application/run/main_scene", "")');
+    expect(gd).toContain('change_scene_to_file(scene_path)');
   });
 
   it('interaction server script reads GODOT_MCP_PORT and announces its port', () => {

@@ -543,15 +543,19 @@ Create `.cursor/mcp.json` in your project:
 
 ## Runtime Tools Setup
 
-To use the `game_*` runtime tools, your Godot project needs the MCP interaction server autoload. Copy `build/scripts/mcp_interaction_server.gd` to your project and register it as an autoload:
+No project changes are needed for the `game_*` runtime tools. When `run_project` launches a game it starts Godot with `--script build/scripts/mcp_bootstrap.gd`. That bootstrap adds the MCP interaction server to the scene tree from the MCP server's own build directory and then loads the project's main scene (or the `scene` passed to `run_project`). Nothing is written into the project: no autoload entry in `project.godot`, no copied script, nothing to clean up, and several MCP servers can run the same project side by side.
+
+If you want runtime tools while launching the game yourself from the Godot editor, register the interaction server as an autoload manually:
 
 1. Copy `build/scripts/mcp_interaction_server.gd` to your project's scripts folder
 2. In Godot: **Project > Project Settings > Autoload**
 3. Add the script with the name `McpInteractionServer`
 
-The server listens on `127.0.0.1` and accepts JSON commands over TCP when the game is running. It reads the port from the `GODOT_MCP_PORT` environment variable and falls back to `9090` when the variable is unset. A value of `0` asks the OS for a free port. Whatever port it binds, the script prints `McpInteractionServer: Listening on 127.0.0.1:<port>` so the MCP server can find it.
+The bootstrap detects a project that registers `McpInteractionServer` itself and does not add a second instance. A project whose `application/run/main_loop_type` replaces the default `SceneTree` cannot be started through the bootstrap; `run_project` runs it unmodified and runtime tools are available only if the project registers the autoload.
 
-When `run_project` launches a game it injects this autoload automatically and sets `GODOT_MCP_PORT` for that process. By default it requests port `0`, so every launched game gets its own free port and several MCP servers can run games side by side without colliding. After connecting, the MCP server sends a `hello` command and compares the reported process id with the process it launched, so it never drives a game started by someone else. Pass `port` to `run_project` to pin a specific port for one run, or set `GODOT_MCP_PORT` on the MCP server to change the default for all runs.
+The interaction server listens on `127.0.0.1` and accepts JSON commands over TCP when the game is running. It reads the port from the `GODOT_MCP_PORT` environment variable and falls back to `9090` when the variable is unset. A value of `0` asks the OS for a free port. Whatever port it binds, the script prints `McpInteractionServer: Listening on 127.0.0.1:<port>` so the MCP server can find it.
+
+`run_project` sets `GODOT_MCP_PORT` for the game it launches. By default it requests port `0`, so every launched game gets its own free port. After connecting, the MCP server sends a `hello` command and compares the reported process id with the process it launched, so it never drives a game started by someone else. Pass `port` to `run_project` to pin a specific port for one run, or set `GODOT_MCP_PORT` on the MCP server to change the default for all runs.
 
 ## Environment Variables
 
@@ -617,7 +621,7 @@ The server uses two communication channels:
 
 1. **Headless CLI** - For operations that don't need a running game (scene reading, modification, resource creation). Runs Godot with `--headless --script godot_operations.gd <operation> <json_params>`.
 
-2. **TCP Socket** - For runtime interaction with a running game. The `mcp_interaction_server.gd` autoload listens on port 9090 and processes JSON commands sent by the TypeScript MCP server.
+2. **TCP Socket** - For runtime interaction with a running game. `run_project` starts the game through `mcp_bootstrap.gd`, which attaches `mcp_interaction_server.gd` to the scene tree without touching the project. The interaction server listens on a per-run loopback port and processes JSON commands sent by the TypeScript MCP server.
 
 ### Source layout
 
@@ -626,7 +630,8 @@ The server uses two communication channels:
 | `src/index.ts` | MCP server, tool definitions, and all handlers |
 | `src/utils.ts` | Pure utility functions (parameter mapping, validation, error helpers) |
 | `src/scripts/godot_operations.gd` | Headless GDScript operations runner |
-| `src/scripts/mcp_interaction_server.gd` | TCP interaction server autoload |
+| `src/scripts/mcp_bootstrap.gd` | SceneTree script that attaches the interaction server and starts the main scene |
+| `src/scripts/mcp_interaction_server.gd` | TCP interaction server node |
 | `tests/` | Vitest test suite |
 
 ## Testing

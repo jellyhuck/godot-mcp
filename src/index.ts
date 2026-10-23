@@ -9,7 +9,7 @@
 
 import { fileURLToPath } from 'url';
 import { join, dirname, basename, normalize, resolve, relative } from 'path';
-import { existsSync, readdirSync, readFileSync, writeFileSync, copyFileSync, unlinkSync, mkdirSync, renameSync, realpathSync } from 'fs';
+import { existsSync, readdirSync, readFileSync, writeFileSync, unlinkSync, mkdirSync, renameSync, realpathSync } from 'fs';
 import { spawn, execFile } from 'child_process';
 import { promisify } from 'util';
 import { createConnection, Socket } from 'net';
@@ -119,7 +119,6 @@ interface GameConnection {
   responseBuffer: string;
   pendingRequests: Map<number, (value: any) => void>;
   projectPath: string | null;
-  interactionServerInjectedByUs: boolean;
   /** Port of the interaction server this connection talks to. */
   port: number | null;
 }
@@ -132,7 +131,7 @@ export class GodotServer {
   private activeProcess: GodotProcess | null = null;
   private godotPath: string | null = null;
   private operationsScriptPath: string;
-  private interactionScriptPath: string;
+  private bootstrapScriptPath: string;
   private validateScriptPath: string;
   private validatedPaths: Map<string, boolean> = new Map();
   private strictPathValidation: boolean = false;
@@ -142,14 +141,14 @@ export class GodotServer {
     responseBuffer: '',
     pendingRequests: new Map(),
     projectPath: null,
-    interactionServerInjectedByUs: false,
     port: null,
   };
   private nextRequestId: number = 1;
   private lastErrorIndex: number = 0;
   private lastLogIndex: number = 0;
   private defaultInteractionPort: number = DEFAULT_RUN_INTERACTION_PORT;
-  private readonly AUTOLOAD_NAME = 'McpInteractionServer';
+  /** Environment variable the bootstrap script reads to pick the scene to start. */
+  private readonly SCENE_ENV_VAR = 'GODOT_MCP_SCENE';
   /** How long to wait for the game to announce its port before giving up. */
   private readonly PORT_ANNOUNCEMENT_TIMEOUT_MS = 30000;
 
@@ -193,7 +192,7 @@ export class GodotServer {
 
     // Set the path to the operations script
     this.operationsScriptPath = join(__dirname, 'scripts', 'godot_operations.gd');
-    this.interactionScriptPath = join(__dirname, 'scripts', 'mcp_interaction_server.gd');
+    this.bootstrapScriptPath = join(__dirname, 'scripts', 'mcp_bootstrap.gd');
     this.validateScriptPath = join(__dirname, 'scripts', 'validate_script.gd');
     if (debugMode) console.error(`[DEBUG] Operations script path: ${this.operationsScriptPath}`);
 
@@ -399,79 +398,20 @@ export class GodotServer {
   }
 
   /**
-   * Inject the interaction server script into the Godot project
+   * Return the project's custom main loop class when application/run/main_loop_type
+   * names something other than the default SceneTree, else null. Such projects
+   * cannot be started through mcp_bootstrap.gd, which is itself a SceneTree.
    */
-  private injectInteractionServer(projectPath: string): void {
-    const projectFile = join(projectPath, 'project.godot');
-    const destScript = join(projectPath, 'mcp_interaction_server.gd');
-
-    const existingContent = readFileSync(projectFile, 'utf8');
-    if (existingContent.includes(this.AUTOLOAD_NAME)) {
-      this.gameConnection.interactionServerInjectedByUs = false;
-      if (!existsSync(destScript)) {
-        copyFileSync(this.interactionScriptPath, destScript);
-        this.logDebug(`Autoload present but script missing; restored ${destScript}`);
-      } else {
-        this.logDebug('Interaction server autoload and script already present; leaving project untouched');
-      }
-      return;
-    }
-
-    this.gameConnection.interactionServerInjectedByUs = true;
-
-    copyFileSync(this.interactionScriptPath, destScript);
-    this.logDebug(`Copied interaction server script to ${destScript}`);
-
-    let content = existingContent;
-
-    const autoloadLine = `${this.AUTOLOAD_NAME}="*res://mcp_interaction_server.gd"`;
-
-    if (content.includes('[autoload]')) {
-      // Add after existing [autoload] section header
-      content = content.replace('[autoload]', `[autoload]\n\n${autoloadLine}`);
-    } else {
-      // Add new [autoload] section at end
-      content += `\n[autoload]\n\n${autoloadLine}\n`;
-    }
-
-    writeFileSync(projectFile, content, 'utf8');
-    this.logDebug(`Injected ${this.AUTOLOAD_NAME} autoload into project.godot`);
-  }
-
-  /**
-   * Remove the interaction server script and autoload from the project
-   */
-  private removeInteractionServer(projectPath: string): void {
-    if (!this.gameConnection.interactionServerInjectedByUs) {
-      this.logDebug('Interaction server was user-managed; skipping cleanup');
-      return;
-    }
-    this.gameConnection.interactionServerInjectedByUs = false;
-
-    const projectFile = join(projectPath, 'project.godot');
-    const destScript = join(projectPath, 'mcp_interaction_server.gd');
-
-    // Remove autoload line from project.godot
-    if (existsSync(projectFile)) {
-      let content = readFileSync(projectFile, 'utf8');
-      // Remove the autoload line (and any surrounding blank line)
-      const autoloadLine = `${this.AUTOLOAD_NAME}="*res://mcp_interaction_server.gd"`;
-      content = content.replace(new RegExp(`\\n?${autoloadLine.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\n?`), '\n');
-      writeFileSync(projectFile, content, 'utf8');
-      this.logDebug('Removed interaction server autoload from project.godot');
-    }
-
-    // Delete the script file
-    if (existsSync(destScript)) {
-      unlinkSync(destScript);
-      this.logDebug('Deleted interaction server script from project');
-    }
-
-    // Also clean up the .uid file if Godot created one
-    const uidFile = destScript + '.uid';
-    if (existsSync(uidFile)) {
-      unlinkSync(uidFile);
-      this.logDebug('Deleted interaction server .uid file');
+  private readCustomMainLoopType(projectFile: string): string | null {
+    try {
+      const content = readFileSync(projectFile, 'utf8');
+      const match = /^\s*run\/main_loop_type\s*=\s*"([^"]*)"/m.exec(content);
+      if (!match) return null;
+      const value = match[1].trim();
+      if (value === '' || value === 'SceneTree') return null;
+      return value;
+    } catch {
+      return null;
     }
   }
 
@@ -698,10 +638,7 @@ export class GodotServer {
   private async cleanup() {
     this.logDebug('Cleaning up resources');
     this.disconnectFromGame();
-    if (this.gameConnection.projectPath) {
-      this.removeInteractionServer(this.gameConnection.projectPath);
-      this.gameConnection.projectPath = null;
-    }
+    this.gameConnection.projectPath = null;
     if (this.activeProcess) {
       this.logDebug('Killing active Godot process');
       this.activeProcess.process.kill();
@@ -3914,33 +3851,51 @@ export class GodotServer {
         );
       }
 
-      // Kill any existing process
+      // Kill any existing process. Its exit handler only touches state that
+      // still belongs to it, so the new run below is not disturbed.
       if (this.activeProcess) {
         this.logDebug('Killing existing Godot process before starting a new one');
         this.disconnectFromGame();
-        if (this.gameConnection.projectPath) {
-          this.removeInteractionServer(this.gameConnection.projectPath);
-        }
+        this.gameConnection.projectPath = null;
         this.activeProcess.process.kill();
+        this.activeProcess = null;
       }
 
-      // Inject interaction server before launching
-      this.injectInteractionServer(args.projectPath);
+      // The interaction server is attached by mcp_bootstrap.gd from the MCP
+      // server's own build directory, so the project is never modified. A
+      // project that replaces the SceneTree main loop cannot be bootstrapped
+      // this way; it runs as-is and only has runtime tools if it registers
+      // the McpInteractionServer autoload itself.
+      const customMainLoop = this.readCustomMainLoopType(projectFile);
+      const useBootstrap = customMainLoop === null;
+      if (!useBootstrap) {
+        console.error(`[SERVER] Project uses main loop "${customMainLoop}"; launching without the MCP bootstrap`);
+      }
+
+      const spawnEnv: Record<string, string | undefined> = {
+        ...globalThis.process.env,
+        [INTERACTION_PORT_ENV_VAR]: String(requestedPort),
+      };
+      delete spawnEnv[this.SCENE_ENV_VAR];
 
       const cmdArgs = ['-d', ...engineArgs, '--path', args.projectPath];
+      if (useBootstrap) {
+        cmdArgs.push('--script', this.bootstrapScriptPath);
+      }
       if (args.scene && validatePath(args.scene)) {
         this.logDebug(`Adding scene parameter: ${args.scene}`);
-        cmdArgs.push(args.scene);
+        if (useBootstrap) {
+          spawnEnv[this.SCENE_ENV_VAR] = args.scene;
+        } else {
+          cmdArgs.push(args.scene);
+        }
       }
       if (userArgs.length > 0) {
         cmdArgs.push('--', ...userArgs);
       }
 
       this.logDebug(`Running Godot project: ${args.projectPath} with args: ${JSON.stringify(cmdArgs)} (interaction port ${requestedPort === 0 ? 'ephemeral' : requestedPort})`);
-      const process = spawn(this.godotPath!, cmdArgs, {
-        stdio: 'pipe',
-        env: { ...globalThis.process.env, [INTERACTION_PORT_ENV_VAR]: String(requestedPort) },
-      });
+      const process = spawn(this.godotPath!, cmdArgs, { stdio: 'pipe', env: spawnEnv });
       const output: string[] = [];
       const errors: string[] = [];
       const activeProcess: GodotProcess = {
@@ -3989,12 +3944,11 @@ export class GodotServer {
 
       process.on('exit', (code: number | null) => {
         this.logDebug(`Godot process exited with code ${code}`);
-        this.disconnectFromGame();
-        if (this.gameConnection.projectPath) {
-          this.removeInteractionServer(this.gameConnection.projectPath);
-          this.gameConnection.projectPath = null;
-        }
+        // Only tear down state that still belongs to this process; a newer
+        // run_project may already have replaced it.
         if (this.activeProcess && this.activeProcess.process === process) {
+          this.disconnectFromGame();
+          this.gameConnection.projectPath = null;
           this.activeProcess = null;
         }
       });
@@ -4013,9 +3967,11 @@ export class GodotServer {
         this.logDebug(`Failed to connect to game interaction server: ${err}`);
       });
 
-      const portText = requestedPort === 0
-        ? 'Game interaction server will use a free port announced by the game'
-        : `Game interaction server connecting on port ${requestedPort}`;
+      const portText = !useBootstrap
+        ? `Project uses custom main loop "${customMainLoop}", so the MCP interaction server was not attached; runtime tools need the McpInteractionServer autoload registered in the project`
+        : requestedPort === 0
+          ? 'Game interaction server will use a free port announced by the game'
+          : `Game interaction server connecting on port ${requestedPort}`;
       return {
         content: [
           {
@@ -4080,11 +4036,7 @@ export class GodotServer {
     this.lastErrorIndex = 0;
     this.lastLogIndex = 0;
 
-    // Remove injected interaction server
-    if (this.gameConnection.projectPath) {
-      this.removeInteractionServer(this.gameConnection.projectPath);
-      this.gameConnection.projectPath = null;
-    }
+    this.gameConnection.projectPath = null;
 
     return {
       content: [

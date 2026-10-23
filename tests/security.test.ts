@@ -92,6 +92,7 @@ describe('MCP filesystem boundaries', () => {
       expect(JSON.stringify(result.content)).toContain('engineArgs');
     }
     expect(existsSync(join(project, 'mcp_interaction_server.gd'))).toBe(false);
+    expect(readFileSync(join(project, 'project.godot'), 'utf8')).toBe('config_version=5\n');
   });
 
   it('provides items for every array in every advertised schema', async () => {
