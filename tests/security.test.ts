@@ -5,7 +5,7 @@ import { tmpdir } from 'os';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { appendBoundedLines, readLogPage } from '../src/logs.js';
-import { isPathWithinAllowedRoots, validateEngineArgs, validateToolPaths, validateUserArgs, validateWriteMoviePath } from '../src/security.js';
+import { isPathWithinAllowedRoots, validateEngineArgs, validateToolPaths, validateUserArgs, validateEngineOutputPath, validateWriteMoviePath } from '../src/security.js';
 
 describe('MCP filesystem boundaries', () => {
   const workspace = mkdtempSync(join(tmpdir(), 'godot-mcp-test-'));
@@ -86,12 +86,13 @@ describe('MCP filesystem boundaries', () => {
   });
 
   it('rejects run_project engine flags that escape the project before side effects', async () => {
-    for (const engine_args of [['--path', outside], ['--main-pack', join(outside, 'game.pck')], [join(outside, 'project.godot')], ['--write-movie', join(outside, 'run.avi')], ['--write-movie', '../../allowed-sibling/run.avi'], ['--write-movie', 'res://escape/run.avi'], ['--write-movie', 'user://run.avi']]) {
+    for (const engine_args of [['--path', outside], ['--main-pack', join(outside, 'game.pck')], [join(outside, 'project.godot')], ['--write-movie', join(outside, 'run.avi')], ['--write-movie', '../../allowed-sibling/run.avi'], ['--write-movie', 'res://escape/run.avi'], ['--write-movie', 'user://run.avi'], ['--log-file', join(outside, 'run.log')], ['--log-file', 'res://escape/run.log'], ['--log-file', 'user://run.log'], ['--log-file', 'run.log']]) {
       const result = await client.callTool({ name: 'run_project', arguments: { project_path: project, engine_args } });
       expect(result.isError).toBe(true);
       expect(JSON.stringify(result.content)).toContain('engineArgs');
     }
     expect(existsSync(join(outside, 'run.avi'))).toBe(false);
+    expect(existsSync(join(outside, 'run.log'))).toBe(false);
     expect(existsSync(join(project, 'mcp_interaction_server.gd'))).toBe(false);
     expect(readFileSync(join(project, 'project.godot'), 'utf8')).toBe('config_version=5\n');
   });
@@ -150,12 +151,12 @@ describe('run_project argument validation', () => {
   });
 
   it('rejects flags that change the project, run mode or write files', () => {
-    for (const flag of ['--path', '--main-pack', '--script', '-s', '-e', '--editor', '--log-file', '--export-release', '--remote-fs']) {
+    for (const flag of ['--path', '--main-pack', '--script', '-s', '-e', '--editor', '--export-release', '--remote-fs']) {
       expect(validateEngineArgs([flag, 'value'])).toContain('not allowed');
     }
   });
 
-  describe('--write-movie', () => {
+  describe('output file flags', () => {
     const workspace = mkdtempSync(join(tmpdir(), 'godot-mcp-movie-'));
     const allowed = join(workspace, 'allowed');
     const outside = join(workspace, 'allowed-sibling');
@@ -192,6 +193,28 @@ describe('run_project argument validation', () => {
       expect(validateEngineArgs(['--write-movie', 'file:///tmp/run.avi'], project, [allowed])).toContain('filesystem or res://');
       expect(validateEngineArgs(['--write-movie', 'run.avi'])).toContain('requires a project path');
       expect(validateWriteMoviePath('run.avi', project, [outside])).toContain('outside the allowed roots');
+    });
+
+    it('accepts absolute and res:// log files inside the allowed roots', () => {
+      for (const value of ['res://run.log', 'res://logs/godot.txt', join(project, 'run.log'), join(allowed, 'logs', 'run.log')]) {
+        expect(validateEngineArgs(['--log-file', value, '--verbose'], project, [allowed])).toBeNull();
+      }
+      expect(validateEngineArgs(['--log-file', join(outside, 'run.log')], project, [])).toBeNull();
+    });
+
+    it('rejects log files outside the allowed roots and paths Godot resolves against its working directory', () => {
+      for (const value of [join(outside, 'run.log'), 'res://../../allowed-sibling/run.log', 'res://escape/run.log']) {
+        expect(validateEngineArgs(['--log-file', value], project, [allowed])).toContain('outside the allowed roots');
+      }
+      for (const value of ['run.log', 'logs/run.log', '../run.log']) {
+        expect(validateEngineArgs(['--log-file', value], project, [allowed])).toContain('absolute or start with res://');
+      }
+      expect(validateEngineArgs(['--log-file'], project, [allowed])).toContain('requires a value');
+      expect(validateEngineArgs(['--log-file', '--verbose'], project, [allowed])).toContain('requires a file path');
+      expect(validateEngineArgs(['--log-file', 'res://'], project, [allowed])).toContain('must name a file');
+      expect(validateEngineArgs(['--log-file', 'user://logs/run.log'], project, [allowed])).toContain('filesystem or res://');
+      expect(validateEngineArgs(['--log-file', 'res://run.log'])).toContain('requires a project path');
+      expect(validateEngineOutputPath('--verbose', 'anything', project, [allowed])).toBeNull();
     });
   });
 
