@@ -549,7 +549,9 @@ To use the `game_*` runtime tools, your Godot project needs the MCP interaction 
 2. In Godot: **Project > Project Settings > Autoload**
 3. Add the script with the name `McpInteractionServer`
 
-The server listens on `127.0.0.1:9090` and accepts JSON commands over TCP when the game is running.
+The server listens on `127.0.0.1` and accepts JSON commands over TCP when the game is running. It reads the port from the `GODOT_MCP_PORT` environment variable and falls back to `9090` when the variable is unset. A value of `0` asks the OS for a free port. Whatever port it binds, the script prints `McpInteractionServer: Listening on 127.0.0.1:<port>` so the MCP server can find it.
+
+When `run_project` launches a game it injects this autoload automatically and sets `GODOT_MCP_PORT` for that process. By default it requests port `0`, so every launched game gets its own free port and several MCP servers can run games side by side without colliding. After connecting, the MCP server sends a `hello` command and compares the reported process id with the process it launched, so it never drives a game started by someone else. Pass `port` to `run_project` to pin a specific port for one run, or set `GODOT_MCP_PORT` on the MCP server to change the default for all runs.
 
 ## Environment Variables
 
@@ -557,6 +559,7 @@ The server listens on `127.0.0.1:9090` and accepts JSON commands over TCP when t
 |----------|-------------|
 | `GODOT_PATH` | Path to the Godot executable (overrides auto-detection) |
 | `DEBUG` | Set to `"true"` for detailed server-side logging |
+| `GODOT_MCP_PORT` | Optional. Default TCP port for the in-game interaction server when `run_project` launches a game (0 = pick a free port per run). Unset means `0`. Set `9090` to restore the previous fixed-port behaviour. The same variable is read by `mcp_interaction_server.gd` when the game runs outside `run_project`, where it defaults to `9090`. |
 | `GODOT_MCP_ALLOWED_DIRS` | Optional. Restrict all project tools, project discovery and export destinations to these roots. Use `;` or `,` on Windows, and `:` or `,` on other systems. Existing symbolic links are resolved before checking access. When unset, any project root is allowed. |
 
 File and scene paths must stay within their project directory, including paths

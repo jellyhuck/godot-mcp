@@ -10,8 +10,13 @@ var _buffer: String = ""
 var _busy: bool = false
 var _busy_since: float = 0.0
 var _current_id: Variant = null
-const PORT: int = 9090
+# Default port, used when GODOT_MCP_PORT is unset. A value of 0 in the
+# environment asks the OS for any free port; the bound port is printed to stdout
+# so the MCP server can discover it.
+const DEFAULT_PORT: int = 9090
+const PORT_ENV_VAR: String = "GODOT_MCP_PORT"
 const BUSY_TIMEOUT: float = 120.0
+var _port: int = DEFAULT_PORT
 var _key_map: Dictionary
 var _held_keys: Dictionary = {}
 
@@ -19,12 +24,30 @@ func _ready() -> void:
 	# Ensure MCP server keeps processing even when game is paused
 	process_mode = Node.PROCESS_MODE_ALWAYS
 	_init_key_map()
+	_port = _resolve_port()
 	_server = TCPServer.new()
-	var err: int = _server.listen(PORT, "127.0.0.1")
+	var err: int = _server.listen(_port, "127.0.0.1")
 	if err != OK:
-		push_error("McpInteractionServer: Failed to listen on port %d, error: %d" % [PORT, err])
+		push_error("McpInteractionServer: Failed to listen on port %d, error: %d" % [_port, err])
+		_server = null
 		return
-	print("McpInteractionServer: Listening on 127.0.0.1:%d" % PORT)
+	# Resolve the actual port when 0 (ephemeral) was requested
+	_port = _server.get_local_port()
+	print("McpInteractionServer: Listening on 127.0.0.1:%d" % _port)
+
+
+func _resolve_port() -> int:
+	var raw: String = OS.get_environment(PORT_ENV_VAR).strip_edges()
+	if raw.is_empty():
+		return DEFAULT_PORT
+	if not raw.is_valid_int():
+		push_warning("McpInteractionServer: Ignoring invalid %s value '%s', using %d" % [PORT_ENV_VAR, raw, DEFAULT_PORT])
+		return DEFAULT_PORT
+	var value: int = raw.to_int()
+	if value < 0 or value > 65535:
+		push_warning("McpInteractionServer: Ignoring out-of-range %s value %d, using %d" % [PORT_ENV_VAR, value, DEFAULT_PORT])
+		return DEFAULT_PORT
+	return value
 
 
 func _process(_delta: float) -> void:
@@ -109,6 +132,9 @@ func _handle_command(json_str: String) -> void:
 	var params: Dictionary = data.get("params", {})
 
 	match command:
+		# Handshake: lets the MCP server verify it reached the game it launched
+		"hello":
+			_cmd_hello()
 		# Async commands (use await)
 		"screenshot":
 			await _cmd_screenshot()
@@ -347,6 +373,15 @@ func _send_response(data: Dictionary) -> void:
 
 
 # Send response without clearing busy flag (used when rejecting during busy state)
+func _cmd_hello() -> void:
+	_send_response({
+		"success": true,
+		"pid": OS.get_process_id(),
+		"port": _port,
+		"project_path": ProjectSettings.globalize_path("res://"),
+	})
+
+
 func _send_response_raw(data: Dictionary) -> void:
 	if _client == null:
 		return

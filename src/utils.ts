@@ -373,3 +373,48 @@ export function generateCsharpScriptSource(opts: CsharpScriptOptions): string {
   lines.push(classBlock, '');
   return lines.join('\n');
 }
+
+/**
+ * Default TCP port used by the in-game interaction server when nothing else is
+ * configured. Kept in sync with DEFAULT_PORT in mcp_interaction_server.gd.
+ */
+export const DEFAULT_INTERACTION_PORT = 9090;
+
+/**
+ * Environment variable read by both the MCP server (to choose the port for a
+ * launched game) and by mcp_interaction_server.gd (to pick the port to bind).
+ */
+export const INTERACTION_PORT_ENV_VAR = 'GODOT_MCP_PORT';
+
+/**
+ * Parse a TCP port value coming from an environment variable or tool argument.
+ * Accepts integers in [0, 65535] as numbers or numeric strings. 0 means
+ * "let the OS pick a free port". Returns null for anything else so callers can
+ * decide between falling back to a default and reporting an error.
+ */
+export function parseInteractionPort(value: unknown): number | null {
+  if (value === undefined || value === null) return null;
+  let num: number;
+  if (typeof value === 'number') {
+    num = value;
+  } else if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!/^\d+$/.test(trimmed)) return null;
+    num = Number(trimmed);
+  } else {
+    return null;
+  }
+  if (!Number.isInteger(num) || num < 0 || num > 65535) return null;
+  return num;
+}
+
+/**
+ * Extract the bound port from the announcement line mcp_interaction_server.gd
+ * prints once it is listening, e.g. "McpInteractionServer: Listening on 127.0.0.1:54321".
+ * Returns null when the line is not an announcement.
+ */
+export function parseInteractionPortAnnouncement(line: string): number | null {
+  const match = /McpInteractionServer: Listening on 127\.0\.0\.1:(\d{1,5})\b/.exec(line);
+  if (!match) return null;
+  return parseInteractionPort(match[1]);
+}

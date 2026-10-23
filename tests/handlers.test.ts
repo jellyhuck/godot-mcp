@@ -1006,6 +1006,30 @@ describe('Handler source structure', () => {
     }
   });
 
+  it('run_project passes the interaction port to the game and discovers the bound port', () => {
+    // The port is handed to Godot through the environment, never hardcoded
+    expect(sourceCode).toContain("env: { ...globalThis.process.env, [INTERACTION_PORT_ENV_VAR]: String(requestedPort) }");
+    expect(sourceCode).not.toContain('INTERACTION_PORT = 9090');
+    // The server learns the real port from the game's stdout announcement
+    expect(sourceCode).toContain('parseInteractionPortAnnouncement(line)');
+    expect(sourceCode).toContain('private async waitForInteractionPort(proc: GodotProcess)');
+    // Identity handshake guards against connecting to someone else's game
+    expect(sourceCode).toContain("this.sendGameCommand('hello', {}, 5000)");
+    // Tool argument validation
+    expect(sourceCode).toContain('Invalid port: ${args.port}');
+  });
+
+  it('interaction server script reads GODOT_MCP_PORT and announces its port', () => {
+    const gd = readFileSync(join(__dirname, '..', 'src', 'scripts', 'mcp_interaction_server.gd'), 'utf8');
+    expect(gd).toContain('const DEFAULT_PORT: int = 9090');
+    expect(gd).toContain('const PORT_ENV_VAR: String = "GODOT_MCP_PORT"');
+    expect(gd).toContain('OS.get_environment(PORT_ENV_VAR)');
+    expect(gd).toContain('_port = _server.get_local_port()');
+    expect(gd).toContain('print("McpInteractionServer: Listening on 127.0.0.1:%d" % _port)');
+    expect(gd).toMatch(/"hello":\s*\n\s*_cmd_hello\(\)/);
+    expect(gd).toContain('"pid": OS.get_process_id()');
+  });
+
   it('gameCommand checks activeProcess and gameConnection', () => {
     // Verify the gameCommand helper has the guard checks
     expect(sourceCode).toContain("if (!this.activeProcess) return createErrorResponse('No active Godot process");

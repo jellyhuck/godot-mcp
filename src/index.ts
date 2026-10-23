@@ -40,6 +40,9 @@ import {
   isValidCsharpIdentifier,
   parseGodotScriptDiagnostics,
   collectGdPaths,
+  INTERACTION_PORT_ENV_VAR,
+  parseInteractionPort,
+  parseInteractionPortAnnouncement,
   type OperationParams,
 } from './utils.js';
 
@@ -52,6 +55,20 @@ const ALLOWED_PROJECT_ROOTS: string[] = (process.env.GODOT_MCP_ALLOWED_DIRS || '
   .map(p => p.trim())
   .filter(p => p.length > 0)
   .map(p => resolve(p));
+
+// Port the in-game interaction server should bind when run_project launches a
+// game. 0 (the default) asks the OS for a free port per run so several MCP
+// servers can run games side by side; the game announces the bound port on stdout.
+const DEFAULT_RUN_INTERACTION_PORT: number = (() => {
+  const raw = process.env[INTERACTION_PORT_ENV_VAR];
+  if (raw === undefined || raw.trim() === '') return 0;
+  const parsed = parseInteractionPort(raw);
+  if (parsed === null) {
+    console.error(`[SERVER] Ignoring invalid ${INTERACTION_PORT_ENV_VAR}="${raw}"; using an ephemeral port`);
+    return 0;
+  }
+  return parsed;
+})();
 
 const execFileAsync = promisify(execFile);
 
@@ -76,6 +93,10 @@ interface GodotProcess {
   errors: string[];
   outputOffset: number;
   errorOffset: number;
+  /** Port requested for the interaction server (0 = ephemeral). */
+  requestedInteractionPort: number;
+  /** Port the game announced on stdout once it was listening, if any. */
+  interactionPort: number | null;
 }
 
 /**
@@ -86,6 +107,7 @@ interface GodotServerConfig {
   debugMode?: boolean;
   godotDebugMode?: boolean;
   strictPathValidation?: boolean; // New option to control path validation behavior
+  interactionPort?: number; // Default port for launched games (0 = ephemeral); overrides GODOT_MCP_PORT
 }
 
 /**
@@ -98,6 +120,8 @@ interface GameConnection {
   pendingRequests: Map<number, (value: any) => void>;
   projectPath: string | null;
   interactionServerInjectedByUs: boolean;
+  /** Port of the interaction server this connection talks to. */
+  port: number | null;
 }
 
 /**
@@ -119,12 +143,15 @@ export class GodotServer {
     pendingRequests: new Map(),
     projectPath: null,
     interactionServerInjectedByUs: false,
+    port: null,
   };
   private nextRequestId: number = 1;
   private lastErrorIndex: number = 0;
   private lastLogIndex: number = 0;
-  private readonly INTERACTION_PORT = 9090;
+  private defaultInteractionPort: number = DEFAULT_RUN_INTERACTION_PORT;
   private readonly AUTOLOAD_NAME = 'McpInteractionServer';
+  /** How long to wait for the game to announce its port before giving up. */
+  private readonly PORT_ANNOUNCEMENT_TIMEOUT_MS = 30000;
 
   constructor(config?: GodotServerConfig) {
     // Apply configuration if provided
@@ -140,6 +167,14 @@ export class GodotServer {
       }
       if (config.strictPathValidation !== undefined) {
         this.strictPathValidation = config.strictPathValidation;
+      }
+      if (config.interactionPort !== undefined) {
+        const parsed = parseInteractionPort(config.interactionPort);
+        if (parsed === null) {
+          console.warn(`[SERVER] Invalid interactionPort ${config.interactionPort}; using an ephemeral port`);
+        } else {
+          this.defaultInteractionPort = parsed;
+        }
       }
 
       // Store and validate custom Godot path if provided
@@ -441,79 +476,157 @@ export class GodotServer {
   }
 
   /**
+   * Wait for the launched game to announce the port its interaction server is
+   * listening on. Resolves with the announced port, or with the requested
+   * fixed port as a fallback when the game never announces one (e.g. a project
+   * shipping an older copy of mcp_interaction_server.gd that does not print it).
+   * Resolves null when the process exits or the deadline passes with nothing to try.
+   */
+  private async waitForInteractionPort(proc: GodotProcess): Promise<number | null> {
+    const deadline = Date.now() + this.PORT_ANNOUNCEMENT_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      if (this.activeProcess !== proc) return null;
+      if (proc.interactionPort !== null) return proc.interactionPort;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    if (proc.requestedInteractionPort !== 0) {
+      this.logDebug(`No port announcement from game; falling back to requested port ${proc.requestedInteractionPort}`);
+      return proc.requestedInteractionPort;
+    }
+    return null;
+  }
+
+  /**
+   * Open a TCP connection to the interaction server on the given port.
+   */
+  private openGameSocket(port: number): Promise<Socket> {
+    return new Promise<Socket>((resolve, reject) => {
+      const socket = createConnection({ host: '127.0.0.1', port }, () => {
+        socket.removeListener('error', reject);
+        resolve(socket);
+      });
+      socket.once('error', reject);
+    });
+  }
+
+  /**
+   * Verify that the socket reached the game we launched by asking it for its
+   * process id. Older interaction scripts do not know the hello command; those
+   * are accepted as-is so existing projects keep working.
+   */
+  private async verifyGameIdentity(proc: GodotProcess): Promise<boolean> {
+    let response: any;
+    try {
+      response = await this.sendGameCommand('hello', {}, 5000);
+    } catch (err) {
+      this.logDebug(`Handshake with game failed: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    }
+    if (response && typeof response.pid === 'number') {
+      const expected = proc.process.pid;
+      if (typeof expected === 'number' && response.pid !== expected) {
+        console.error(`[SERVER] Interaction server on port ${this.gameConnection.port} belongs to pid ${response.pid}, not our game (pid ${expected}); disconnecting`);
+        return false;
+      }
+      return true;
+    }
+    if (response && typeof response.error === 'string' && response.error.startsWith('Unknown command')) {
+      this.logDebug('Game interaction server predates the hello handshake; skipping identity check');
+      return true;
+    }
+    this.logDebug(`Unexpected handshake response: ${JSON.stringify(response)}`);
+    return true;
+  }
+
+  /**
    * Connect to the game's TCP interaction server with retries
    */
-  private async connectToGame(projectPath: string): Promise<void> {
+  private async connectToGame(projectPath: string, proc: GodotProcess): Promise<void> {
     this.gameConnection.projectPath = projectPath;
 
-    // Initial delay to let the game start up
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    const port = await this.waitForInteractionPort(proc);
+    if (port === null) {
+      if (this.activeProcess === proc) {
+        console.error(`[SERVER] Game did not announce an interaction server port within ${this.PORT_ANNOUNCEMENT_TIMEOUT_MS / 1000}s; runtime tools unavailable`);
+      } else {
+        this.logDebug('Game process no longer running, aborting connection');
+      }
+      return;
+    }
 
     const maxAttempts = 10;
     const retryDelay = 500;
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      if (!this.activeProcess) {
+      if (this.activeProcess !== proc) {
         this.logDebug('Game process no longer running, aborting connection');
         return;
       }
 
+      let socket: Socket;
       try {
-        await new Promise<void>((resolve, reject) => {
-          const socket = createConnection({ host: '127.0.0.1', port: this.INTERACTION_PORT }, () => {
-            this.gameConnection.socket = socket;
-            this.gameConnection.connected = true;
-            this.gameConnection.responseBuffer = '';
-            this.gameConnection.pendingRequests.clear();
-            this.logDebug(`Connected to game interaction server (attempt ${attempt})`);
-            console.error(`[SERVER] Connected to game interaction server on port ${this.INTERACTION_PORT}`);
-
-            socket.on('data', (data: Buffer) => {
-              this.gameConnection.responseBuffer += data.toString();
-              // Process complete lines
-              while (this.gameConnection.responseBuffer.includes('\n')) {
-                const newlinePos = this.gameConnection.responseBuffer.indexOf('\n');
-                const line = this.gameConnection.responseBuffer.substring(0, newlinePos).trim();
-                this.gameConnection.responseBuffer = this.gameConnection.responseBuffer.substring(newlinePos + 1);
-                if (line.length > 0) {
-                  try {
-                    const parsed = JSON.parse(line);
-                    this.resolveGameResponse(parsed);
-                  } catch (e) {
-                    this.logDebug(`Failed to parse game response: ${line}`);
-                  }
-                }
-              }
-            });
-
-            socket.on('close', () => {
-              this.logDebug('Game interaction connection closed');
-              this.gameConnection.connected = false;
-              this.gameConnection.socket = null;
-              this.rejectAllPending({ error: 'Connection closed' });
-            });
-
-            socket.on('error', (err: Error) => {
-              this.logDebug(`Game interaction socket error: ${err.message}`);
-            });
-
-            resolve();
-          });
-
-          socket.on('error', (err: Error) => {
-            reject(err);
-          });
-        });
-
-        // Successfully connected
-        return;
+        socket = await this.openGameSocket(port);
       } catch (err) {
-        this.logDebug(`Connection attempt ${attempt}/${maxAttempts} failed, retrying in ${retryDelay}ms...`);
+        this.logDebug(`Connection attempt ${attempt}/${maxAttempts} to port ${port} failed, retrying in ${retryDelay}ms...`);
         await new Promise(resolve => setTimeout(resolve, retryDelay));
+        continue;
       }
+
+      if (this.activeProcess !== proc) {
+        socket.destroy();
+        this.logDebug('Game process exited while connecting, dropping socket');
+        return;
+      }
+
+      this.gameConnection.socket = socket;
+      this.gameConnection.connected = true;
+      this.gameConnection.port = port;
+      this.gameConnection.responseBuffer = '';
+      this.gameConnection.pendingRequests.clear();
+      this.logDebug(`Connected to game interaction server on port ${port} (attempt ${attempt})`);
+
+      socket.on('data', (data: Buffer) => {
+        this.gameConnection.responseBuffer += data.toString();
+        // Process complete lines
+        while (this.gameConnection.responseBuffer.includes('\n')) {
+          const newlinePos = this.gameConnection.responseBuffer.indexOf('\n');
+          const line = this.gameConnection.responseBuffer.substring(0, newlinePos).trim();
+          this.gameConnection.responseBuffer = this.gameConnection.responseBuffer.substring(newlinePos + 1);
+          if (line.length > 0) {
+            try {
+              const parsed = JSON.parse(line);
+              this.resolveGameResponse(parsed);
+            } catch (e) {
+              this.logDebug(`Failed to parse game response: ${line}`);
+            }
+          }
+        }
+      });
+
+      socket.on('close', () => {
+        this.logDebug('Game interaction connection closed');
+        if (this.gameConnection.socket === socket) {
+          this.gameConnection.connected = false;
+          this.gameConnection.socket = null;
+          this.gameConnection.port = null;
+        }
+        this.rejectAllPending({ error: 'Connection closed' });
+      });
+
+      socket.on('error', (err: Error) => {
+        this.logDebug(`Game interaction socket error: ${err.message}`);
+      });
+
+      if (!(await this.verifyGameIdentity(proc))) {
+        this.disconnectFromGame();
+        return;
+      }
+
+      console.error(`[SERVER] Connected to game interaction server on port ${port}`);
+      return;
     }
 
-    console.error(`[SERVER] Failed to connect to game interaction server after ${maxAttempts} attempts`);
+    console.error(`[SERVER] Failed to connect to game interaction server on port ${port} after ${maxAttempts} attempts`);
   }
 
   /**
@@ -525,6 +638,7 @@ export class GodotServer {
       this.gameConnection.socket = null;
     }
     this.gameConnection.connected = false;
+    this.gameConnection.port = null;
     this.gameConnection.responseBuffer = '';
     this.rejectAllPending({ error: 'Disconnected' });
   }
@@ -867,6 +981,10 @@ export class GodotServer {
                 type: 'array',
                 items: { type: 'string' },
                 description: 'Optional: Game args after "--", read via OS.get_cmdline_user_args()',
+              },
+              port: {
+                type: 'number',
+                description: 'Optional: interaction server TCP port (0 = free port, default GODOT_MCP_PORT)',
               },
             },
             required: ['projectPath'],
@@ -3776,6 +3894,17 @@ export class GodotServer {
     const engineArgs: string[] = args.engineArgs ?? [];
     const userArgs: string[] = args.userArgs ?? [];
 
+    let requestedPort = this.defaultInteractionPort;
+    if (args.port !== undefined && args.port !== null && args.port !== '') {
+      const parsed = parseInteractionPort(args.port);
+      if (parsed === null) {
+        return createErrorResponse(
+          `Invalid port: ${args.port}. Expected an integer between 0 and 65535 (0 = pick a free port).`
+        );
+      }
+      requestedPort = parsed;
+    }
+
     try {
       // Check if the project directory exists and contains a project.godot file
       const projectFile = join(args.projectPath, 'project.godot');
@@ -3807,20 +3936,47 @@ export class GodotServer {
         cmdArgs.push('--', ...userArgs);
       }
 
-      this.logDebug(`Running Godot project: ${args.projectPath} with args: ${JSON.stringify(cmdArgs)}`);
-      const process = spawn(this.godotPath!, cmdArgs, { stdio: 'pipe' });
+      this.logDebug(`Running Godot project: ${args.projectPath} with args: ${JSON.stringify(cmdArgs)} (interaction port ${requestedPort === 0 ? 'ephemeral' : requestedPort})`);
+      const process = spawn(this.godotPath!, cmdArgs, {
+        stdio: 'pipe',
+        env: { ...globalThis.process.env, [INTERACTION_PORT_ENV_VAR]: String(requestedPort) },
+      });
       const output: string[] = [];
       const errors: string[] = [];
-      const activeProcess: GodotProcess = { process, output, errors, outputOffset: 0, errorOffset: 0 };
+      const activeProcess: GodotProcess = {
+        process,
+        output,
+        errors,
+        outputOffset: 0,
+        errorOffset: 0,
+        requestedInteractionPort: requestedPort,
+        interactionPort: null,
+      };
       this.lastLogIndex = 0;
       this.lastErrorIndex = 0;
 
+      // Partial last line of the previous stdout chunk, so the port announcement
+      // is recognised even when it arrives split across two chunks.
+      let stdoutCarry = '';
       process.stdout?.on('data', (data: Buffer) => {
-        const lines = data.toString().split('\n');
+        const text = data.toString();
+        const lines = text.split('\n');
         activeProcess.outputOffset += appendBoundedLines(output, lines);
         lines.forEach((line: string) => {
           if (line.trim()) this.logDebug(`[Godot stdout] ${line}`);
         });
+        if (activeProcess.interactionPort === null) {
+          const completeLines = (stdoutCarry + text).split('\n');
+          stdoutCarry = completeLines.pop() ?? '';
+          for (const line of completeLines) {
+            const announced = parseInteractionPortAnnouncement(line);
+            if (announced !== null) {
+              activeProcess.interactionPort = announced;
+              this.logDebug(`Game announced interaction server on port ${announced}`);
+              break;
+            }
+          }
+        }
       });
 
       process.stderr?.on('data', (data: Buffer) => {
@@ -3853,15 +4009,18 @@ export class GodotServer {
       this.activeProcess = activeProcess;
 
       // Start async TCP connection to the interaction server (fire-and-forget)
-      this.connectToGame(args.projectPath).catch(err => {
+      this.connectToGame(args.projectPath, activeProcess).catch(err => {
         this.logDebug(`Failed to connect to game interaction server: ${err}`);
       });
 
+      const portText = requestedPort === 0
+        ? 'Game interaction server will use a free port announced by the game'
+        : `Game interaction server connecting on port ${requestedPort}`;
       return {
         content: [
           {
             type: 'text',
-            text: `Godot project started in debug mode${engineArgs.length || userArgs.length ? ` with extra arguments: ${JSON.stringify({ engineArgs, userArgs })}` : ''}. Use get_debug_output to see output. Game interaction server connecting on port ${this.INTERACTION_PORT}...`,
+            text: `Godot project started in debug mode${engineArgs.length || userArgs.length ? ` with extra arguments: ${JSON.stringify({ engineArgs, userArgs })}` : ''}. Use get_debug_output to see output. ${portText}...`,
           },
         ],
       };

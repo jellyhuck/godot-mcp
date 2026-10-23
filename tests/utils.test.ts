@@ -7,6 +7,10 @@ import {
   validatePath,
   createErrorResponse,
   isGodot44OrLater,
+  parseInteractionPort,
+  parseInteractionPortAnnouncement,
+  DEFAULT_INTERACTION_PORT,
+  INTERACTION_PORT_ENV_VAR,
 } from '../src/utils.js';
 
 describe('PARAMETER_MAPPINGS', () => {
@@ -223,5 +227,46 @@ describe('isGodot44OrLater', () => {
   it('handles version strings with extra info', () => {
     expect(isGodot44OrLater('4.4.1.stable')).toBe(true);
     expect(isGodot44OrLater('4.3.2.rc1')).toBe(false);
+  });
+});
+
+describe('parseInteractionPort', () => {
+  it('accepts integers and numeric strings in range', () => {
+    expect(parseInteractionPort(0)).toBe(0);
+    expect(parseInteractionPort(9090)).toBe(9090);
+    expect(parseInteractionPort(65535)).toBe(65535);
+    expect(parseInteractionPort('0')).toBe(0);
+    expect(parseInteractionPort(' 54321 ')).toBe(54321);
+  });
+
+  it('rejects out-of-range, fractional, negative and non-numeric values', () => {
+    expect(parseInteractionPort(65536)).toBeNull();
+    expect(parseInteractionPort(-1)).toBeNull();
+    expect(parseInteractionPort(80.5)).toBeNull();
+    expect(parseInteractionPort('abc')).toBeNull();
+    expect(parseInteractionPort('12ab')).toBeNull();
+    expect(parseInteractionPort('')).toBeNull();
+    expect(parseInteractionPort(undefined)).toBeNull();
+    expect(parseInteractionPort(null)).toBeNull();
+    expect(parseInteractionPort({})).toBeNull();
+  });
+});
+
+describe('parseInteractionPortAnnouncement', () => {
+  it('extracts the port from the listening announcement', () => {
+    expect(parseInteractionPortAnnouncement('McpInteractionServer: Listening on 127.0.0.1:9090')).toBe(9090);
+    expect(parseInteractionPortAnnouncement('McpInteractionServer: Listening on 127.0.0.1:54321\r')).toBe(54321);
+  });
+
+  it('ignores unrelated or malformed output', () => {
+    expect(parseInteractionPortAnnouncement('McpInteractionServer: Client connected')).toBeNull();
+    expect(parseInteractionPortAnnouncement('Listening on 127.0.0.1:9090')).toBeNull();
+    expect(parseInteractionPortAnnouncement('McpInteractionServer: Listening on 127.0.0.1:99999')).toBeNull();
+    expect(parseInteractionPortAnnouncement('')).toBeNull();
+  });
+
+  it('agrees with the default port constant and the GDScript source', () => {
+    expect(DEFAULT_INTERACTION_PORT).toBe(9090);
+    expect(INTERACTION_PORT_ENV_VAR).toBe('GODOT_MCP_PORT');
   });
 });
