@@ -64,14 +64,15 @@ it.skipIf(!process.env.GODOT_SMOKE_PATH)('runs a project through the bootstrap w
     const projectBefore = readFileSync(join(projectPath, 'project.godot'), 'utf8');
     const filesBefore = readdirSync(projectPath).sort();
 
-    await call('run_project', { projectPath, engineArgs: ['--headless'] });
-    const deadline = Date.now() + 60000;
-    while (!instance.gameConnection.connected && Date.now() < deadline) {
-      expect(instance.activeProcess, 'game exited before connecting').not.toBeNull();
-      await new Promise(resolve => setTimeout(resolve, 200));
-    }
+    // run_project returns only once the game accepted the TCP connection and
+    // answered the hello handshake, so no polling is needed here.
+    const run = await call('run_project', { projectPath, engineArgs: ['--headless'], timeout: 60 });
+    const launched = JSON.parse((run.content as any[])[0].text);
+    expect(launched).toMatchObject({ status: 'connected', connected: true, bootstrap: true });
+    expect(launched.pid).toBe(instance.activeProcess.process.pid);
+    expect(launched.port).toBe(instance.gameConnection.port);
+    expect(launched.port).not.toBe(9090);
     expect(instance.gameConnection.connected).toBe(true);
-    expect(instance.gameConnection.port).not.toBe(9090);
 
     const tree = await call('game_get_scene_tree', {});
     const treeText = JSON.stringify(tree.content);

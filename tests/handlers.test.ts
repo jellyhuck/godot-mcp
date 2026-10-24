@@ -1013,7 +1013,7 @@ describe('Handler source structure', () => {
     expect(sourceCode).not.toContain('INTERACTION_PORT = 9090');
     // The server learns the real port from the game's stdout announcement
     expect(sourceCode).toContain('parseInteractionPortAnnouncement(line)');
-    expect(sourceCode).toContain('private async waitForInteractionPort(proc: GodotProcess)');
+    expect(sourceCode).toContain('private async waitForInteractionPort(proc: GodotProcess, deadline: number');
     // Identity handshake guards against connecting to someone else's game
     expect(sourceCode).toContain("this.sendGameCommand('hello', {}, 5000)");
     // Tool argument validation
@@ -1033,6 +1033,24 @@ describe('Handler source structure', () => {
     expect(sourceCode).toContain('spawnEnv[this.SCENE_ENV_VAR] = args.scene;');
     // A late exit of a replaced process must not tear down the new run
     expect(sourceCode).toMatch(/process\.on\('exit'[\s\S]*?if \(this\.activeProcess && this\.activeProcess\.process === process\) \{\s*this\.disconnectFromGame\(\);/);
+  });
+
+  it('run_project waits for the game connection with a configurable budget', () => {
+    // The connection is awaited with an absolute deadline derived from the timeout
+    expect(sourceCode).toContain('const result = await this.connectToGame(args.projectPath, activeProcess, activeProcess.startedAt! + timeoutMs);');
+    expect(sourceCode).toContain('private async connectToGame(');
+    expect(sourceCode).toContain('): Promise<GameConnectResult>');
+    // Timeout comes from the tool argument or the environment default
+    expect(sourceCode).toContain('Invalid timeout: ${args.timeout}');
+    expect(sourceCode).toContain('CONNECT_TIMEOUT_ENV_VAR');
+    // Custom main loop projects only wait when they register the autoload themselves
+    expect(sourceCode).toContain('private projectRegistersInteractionServer(projectFile: string): boolean');
+    expect(sourceCode).toContain('const awaitConnection = useBootstrap || registersServer;');
+    // Exit and spawn errors settle the tracked process so the wait ends early
+    expect(sourceCode).toContain('settleExit({ code, signal });');
+    expect(sourceCode).toContain('settleExit({ code: null, signal: null, error: err.message });');
+    // run_project tool schema exposes the timeout
+    expect(sourceCode).toMatch(/name: 'run_project'[\s\S]*?timeout: \{\s*type: 'number'/);
   });
 
   it('bootstrap script attaches the interaction server and starts the scene', () => {

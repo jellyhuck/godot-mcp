@@ -418,3 +418,34 @@ export function parseInteractionPortAnnouncement(line: string): number | null {
   if (!match) return null;
   return parseInteractionPort(match[1]);
 }
+
+/**
+ * Environment variable holding the default number of seconds run_project waits
+ * for the launched game to connect before reporting an error.
+ */
+export const CONNECT_TIMEOUT_ENV_VAR = 'GODOT_MCP_CONNECT_TIMEOUT';
+
+/** Upper bound for the run_project connection timeout, in seconds. */
+export const MAX_CONNECT_TIMEOUT_SECONDS = 3600;
+
+/**
+ * Parse a connection timeout given in seconds (number or numeric string) and
+ * return it in milliseconds. Fractions are allowed; the value must be positive
+ * and at most MAX_CONNECT_TIMEOUT_SECONDS. Returns null for anything else so
+ * callers can fall back to a default or report an error.
+ */
+export function parseConnectTimeoutSeconds(value: unknown): number | null {
+  if (value === undefined || value === null) return null;
+  let seconds: number;
+  if (typeof value === 'number') {
+    seconds = value;
+  } else if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!/^\d+(\.\d+)?$/.test(trimmed)) return null;
+    seconds = Number(trimmed);
+  } else {
+    return null;
+  }
+  if (!Number.isFinite(seconds) || seconds <= 0 || seconds > MAX_CONNECT_TIMEOUT_SECONDS) return null;
+  return Math.round(seconds * 1000);
+}

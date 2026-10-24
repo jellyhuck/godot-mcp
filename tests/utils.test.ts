@@ -9,6 +9,9 @@ import {
   isGodot44OrLater,
   parseInteractionPort,
   parseInteractionPortAnnouncement,
+  parseConnectTimeoutSeconds,
+  CONNECT_TIMEOUT_ENV_VAR,
+  MAX_CONNECT_TIMEOUT_SECONDS,
   DEFAULT_INTERACTION_PORT,
   INTERACTION_PORT_ENV_VAR,
 } from '../src/utils.js';
@@ -268,5 +271,33 @@ describe('parseInteractionPortAnnouncement', () => {
   it('agrees with the default port constant and the GDScript source', () => {
     expect(DEFAULT_INTERACTION_PORT).toBe(9090);
     expect(INTERACTION_PORT_ENV_VAR).toBe('GODOT_MCP_PORT');
+  });
+});
+
+describe('parseConnectTimeoutSeconds', () => {
+  it('converts positive seconds (numbers or numeric strings) to milliseconds', () => {
+    expect(parseConnectTimeoutSeconds(30)).toBe(30000);
+    expect(parseConnectTimeoutSeconds(0.25)).toBe(250);
+    expect(parseConnectTimeoutSeconds('45')).toBe(45000);
+    expect(parseConnectTimeoutSeconds(' 1.5 ')).toBe(1500);
+    expect(parseConnectTimeoutSeconds(MAX_CONNECT_TIMEOUT_SECONDS)).toBe(MAX_CONNECT_TIMEOUT_SECONDS * 1000);
+  });
+
+  it('rejects zero, negative, oversized and non-numeric values', () => {
+    expect(parseConnectTimeoutSeconds(0)).toBeNull();
+    expect(parseConnectTimeoutSeconds(-5)).toBeNull();
+    expect(parseConnectTimeoutSeconds(MAX_CONNECT_TIMEOUT_SECONDS + 1)).toBeNull();
+    expect(parseConnectTimeoutSeconds(Number.NaN)).toBeNull();
+    expect(parseConnectTimeoutSeconds(Number.POSITIVE_INFINITY)).toBeNull();
+    expect(parseConnectTimeoutSeconds('abc')).toBeNull();
+    expect(parseConnectTimeoutSeconds('10s')).toBeNull();
+    expect(parseConnectTimeoutSeconds('')).toBeNull();
+    expect(parseConnectTimeoutSeconds(undefined)).toBeNull();
+    expect(parseConnectTimeoutSeconds(null)).toBeNull();
+    expect(parseConnectTimeoutSeconds({})).toBeNull();
+  });
+
+  it('names the environment variable run_project reads for its default', () => {
+    expect(CONNECT_TIMEOUT_ENV_VAR).toBe('GODOT_MCP_CONNECT_TIMEOUT');
   });
 });

@@ -221,9 +221,9 @@ The original godot-mcp provided 20 tools for basic project management and scene 
 | Tool | Description |
 |------|-------------|
 | `launch_editor` | Launch Godot editor for a project |
-| `run_project` | Run a Godot project and capture output, with optional `engineArgs` and `userArgs` |
+| `run_project` | Run a Godot project, wait for the game to connect and return its pid and port; optional `engineArgs`, `userArgs`, `port`, `timeout` |
 | `stop_project` | Stop the running project |
-| `get_debug_output` | Get console output and errors |
+| `get_debug_output` | Get console output, errors and the state of the running game (pid, connection, exit code) |
 | `get_godot_version` | Get installed Godot version |
 | `list_projects` | Find Godot projects in a directory |
 | `get_project_info` | Get project metadata |
@@ -557,6 +557,41 @@ The interaction server listens on `127.0.0.1` and accepts JSON commands over TCP
 
 `run_project` sets `GODOT_MCP_PORT` for the game it launches. By default it requests port `0`, so every launched game gets its own free port. After connecting, the MCP server sends a `hello` command and compares the reported process id with the process it launched, so it never drives a game started by someone else. Pass `port` to `run_project` to pin a specific port for one run, or set `GODOT_MCP_PORT` on the MCP server to change the default for all runs.
 
+### What `run_project` waits for and returns
+
+`run_project` returns only once the launched game has announced its port, accepted the TCP connection and answered the `hello` handshake. The `game_*` tools are therefore usable as soon as the call returns; no polling is needed. The result is JSON:
+
+```json
+{
+  "message": "Godot project started and connected to the game interaction server on port 54321.",
+  "status": "connected",
+  "connected": true,
+  "awaitedConnection": true,
+  "pid": 12345,
+  "projectPath": "/path/to/project",
+  "scene": null,
+  "bootstrap": true,
+  "mainLoopType": null,
+  "requestedPort": 0,
+  "engineArgs": [],
+  "userArgs": [],
+  "elapsedMs": 1830,
+  "output": ["..."],
+  "errors": [],
+  "port": 54321,
+  "connectAttempts": 1,
+  "timeoutSeconds": 30
+}
+```
+
+`output` and `errors` hold the last 20 lines of each stream; `get_debug_output` has the full retained streams.
+
+The wait is bounded by the optional `timeout` argument (seconds), which defaults to `GODOT_MCP_CONNECT_TIMEOUT` or 30 seconds. When the game has not connected by then, the call returns an error whose text starts with a one-line summary and continues with the same JSON fields plus `reason` (`no-port`, `unreachable` or `handshake-failed`), `running`, `announcedPort`, `exitCode`, `exitSignal` and `spawnError`. The game keeps running and stays tracked, so `get_debug_output` and `stop_project` still work on it. If Godot exits or cannot be spawned before connecting, the call fails immediately with `status` `exited` or `spawn-error` instead of waiting out the timeout, and `stop_project` or a second `run_project` during the wait ends it with `status` `superseded`.
+
+A project with a custom `application/run/main_loop_type` is launched without the bootstrap. If its `project.godot` registers the `McpInteractionServer` autoload, `run_project` waits for the connection as usual; otherwise it returns right after spawning with `status` `started`, `connected: false` and `reason` `custom-main-loop-without-autoload`.
+
+Many MCP clients cap a single tool call at around 60 seconds, so a `timeout` above that may be cut off on the client side while the server keeps waiting.
+
 ## Environment Variables
 
 | Variable | Description |
@@ -564,6 +599,7 @@ The interaction server listens on `127.0.0.1` and accepts JSON commands over TCP
 | `GODOT_PATH` | Path to the Godot executable (overrides auto-detection) |
 | `DEBUG` | Set to `"true"` for detailed server-side logging |
 | `GODOT_MCP_PORT` | Optional. Default TCP port for the in-game interaction server when `run_project` launches a game (0 = pick a free port per run). Unset means `0`. Set `9090` to restore the previous fixed-port behaviour. The same variable is read by `mcp_interaction_server.gd` when the game runs outside `run_project`, where it defaults to `9090`. |
+| `GODOT_MCP_CONNECT_TIMEOUT` | Optional. Default number of seconds `run_project` waits for the launched game to announce its port, accept the TCP connection and answer the `hello` handshake before returning an error. Unset means `30`. The per-call `timeout` argument overrides it. |
 | `GODOT_MCP_ALLOWED_DIRS` | Optional. Restrict all project tools, project discovery and export destinations to these roots. Use `;` or `,` on Windows, and `:` or `,` on other systems. Existing symbolic links are resolved before checking access. When unset, any project root is allowed. |
 
 File and scene paths must stay within their project directory, including paths
@@ -573,7 +609,7 @@ separate account or container when executing untrusted code.
 
 ### Custom run flags
 
-`run_project` accepts two optional string arrays:
+`run_project` accepts two optional string arrays (plus `port` and `timeout`, described above):
 
 - `engineArgs`: Godot engine flags inserted before `--path`, for example
   `["--verbose", "--windowed", "--resolution", "1280x720"]`. Only display,
@@ -603,7 +639,8 @@ include `nextCursor`, `hasMore` and `dropped`. Pass `nextCursor` back to continu
 from the same position. Calls without a cursor continue from the previous call.
 Each stream retains the newest 2,000 lines, with at most 4,096 characters per line.
 If a cursor predates retained output, `dropped` is true. `get_debug_output` returns
-the retained streams and their starting offsets.
+the retained streams and their starting offsets, plus `pid`, `running`, `connected`,
+`port`, `connectState`, `exitCode` and `uptimeMs` for the tracked process.
 
 ### Contributor validation
 
@@ -647,15 +684,20 @@ The server uses two communication channels:
 
 ## Testing
 
-The project uses [Vitest](https://vitest.dev/) with 446 tests across 5 files:
+The project uses [Vitest](https://vitest.dev/) with 518 tests across 10 files (the engine smoke test is skipped unless `GODOT_SMOKE_PATH` is set):
 
 | File | Tests | What it covers |
 |------|-------|----------------|
-| `tests/utils.test.ts` | 31 | Parameter mappings, normalization, path validation, error responses, version detection |
-| `tests/tool-definitions.test.ts` | 163 | All 155 tools defined, schemas valid, names unique, descriptions < 80 chars |
-| `tests/handlers.test.ts` | 225 | Game command arg transforms, required-param validation, headless op path checks, source structure |
+| `tests/utils.test.ts` | 39 | Parameter mappings, normalization, path validation, error responses, version detection, port and timeout parsing |
+| `tests/tool-definitions.test.ts` | 165 | All tools defined, schemas valid, names unique, descriptions < 80 chars |
+| `tests/handlers.test.ts` | 230 | Game command arg transforms, required-param validation, headless op path checks, source structure |
+| `tests/run-project.test.ts` | 12 | `run_project` against a mocked `spawn` and a fake interaction server: awaited connect, timeout, exit, spawn error, superseded runs, custom main loop |
+| `tests/game-connection.test.ts` | 8 | Port announcement wait, fixed-port fallback, retries, `hello` identity handshake |
+| `tests/security.test.ts` | 30 | Allowed roots, engine/user argument allowlists, path containment |
 | `tests/dotnet.test.ts` | 20 | .NET feature flag, .csproj generation, C# script template generation, identifier validation |
 | `tests/validate-script.test.ts` | 12 | GDScript diagnostic parsing + git-changed file collection |
+| `tests/cli-entry.test.ts` | 2 | Executable entry point lists tools over stdio |
+| `tests/engine-smoke.test.ts` | 2 | Real-engine smoke test: headless operations and a bootstrap run, skipped without `GODOT_SMOKE_PATH` |
 
 ```bash
 npm test          # run once

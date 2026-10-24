@@ -4,39 +4,8 @@
  * No Godot binary is needed.
  */
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createServer, Server, Socket } from 'net';
-import { AddressInfo } from 'net';
 import { GodotServer } from '../src/index.js';
-
-type HelloBehaviour = { pid: number } | 'unknown-command' | 'silent';
-
-function startFakeGame(behaviour: HelloBehaviour): Promise<{ server: Server; port: number; received: string[] }> {
-  return new Promise(resolve => {
-    const received: string[] = [];
-    const server = createServer((socket: Socket) => {
-      let buffer = '';
-      socket.on('data', chunk => {
-        buffer += chunk.toString();
-        let idx: number;
-        while ((idx = buffer.indexOf('\n')) >= 0) {
-          const line = buffer.slice(0, idx);
-          buffer = buffer.slice(idx + 1);
-          if (!line.trim()) continue;
-          received.push(line);
-          const req = JSON.parse(line);
-          if (behaviour === 'silent') continue;
-          const reply = behaviour === 'unknown-command'
-            ? { error: `Unknown command: ${req.command}`, id: req.id }
-            : { success: true, pid: behaviour.pid, port: (server.address() as AddressInfo).port, id: req.id };
-          socket.write(JSON.stringify(reply) + '\n');
-        }
-      });
-    });
-    server.listen(0, '127.0.0.1', () => {
-      resolve({ server, port: (server.address() as AddressInfo).port, received });
-    });
-  });
-}
+import { FakeGame, startFakeGame, stopFakeGame } from './helpers/fake-game.js';
 
 function makeProc(instance: any, pid: number, announcedPort: number | null, requestedPort: number) {
   const proc = {
@@ -54,7 +23,7 @@ function makeProc(instance: any, pid: number, announcedPort: number | null, requ
 
 describe('game interaction connection', () => {
   let instance: any;
-  let fake: { server: Server; port: number; received: string[] } | null = null;
+  let fake: FakeGame | null = null;
   let sigintListeners: NodeJS.SignalsListener[];
 
   beforeEach(() => {
@@ -70,41 +39,46 @@ describe('game interaction connection', () => {
     for (const listener of process.listeners('SIGINT')) {
       if (!sigintListeners.includes(listener)) process.removeListener('SIGINT', listener);
     }
-    if (fake) {
-      await new Promise(resolve => fake!.server.close(resolve));
-      fake = null;
-    }
+    await stopFakeGame(fake);
+    fake = null;
   });
 
   it('connects to the port announced by the game and verifies the pid', async () => {
     fake = await startFakeGame({ pid: 4242 });
     const proc = makeProc(instance, 4242, fake.port, 0);
-    await instance.connectToGame('/fake/project', proc);
+    const result = await instance.connectToGame('/fake/project', proc);
+    expect(result).toMatchObject({ connected: true, port: fake.port, attempts: 1 });
     expect(instance.gameConnection.connected).toBe(true);
     expect(instance.gameConnection.port).toBe(fake.port);
     expect(fake.received.map(l => JSON.parse(l).command)).toEqual(['hello']);
+    expect(proc).toMatchObject({ connectState: 'connected', connectReason: null });
   });
 
   it('drops the connection when the game belongs to another process', async () => {
     fake = await startFakeGame({ pid: 1 });
     const proc = makeProc(instance, 4242, fake.port, 0);
-    await instance.connectToGame('/fake/project', proc);
+    const result = await instance.connectToGame('/fake/project', proc);
+    expect(result).toMatchObject({ connected: false, reason: 'handshake-failed', port: fake.port });
     expect(instance.gameConnection.connected).toBe(false);
     expect(instance.gameConnection.socket).toBeNull();
     expect(instance.gameConnection.port).toBeNull();
+    expect(proc).toMatchObject({ connectState: 'failed', connectReason: 'handshake-failed' });
   });
 
   it('accepts an interaction server that predates the hello command', async () => {
     fake = await startFakeGame('unknown-command');
     const proc = makeProc(instance, 4242, fake.port, 0);
-    await instance.connectToGame('/fake/project', proc);
+    const result = await instance.connectToGame('/fake/project', proc);
+    expect(result.connected).toBe(true);
     expect(instance.gameConnection.connected).toBe(true);
   });
 
   it('falls back to the requested fixed port when nothing is announced', async () => {
     fake = await startFakeGame({ pid: 4242 });
     const proc = makeProc(instance, 4242, null, fake.port);
-    await instance.connectToGame('/fake/project', proc);
+    const result = await instance.connectToGame('/fake/project', proc);
+    expect(result).toMatchObject({ connected: true, port: fake.port });
+    expect(result.elapsedMs).toBeGreaterThanOrEqual(250);
     expect(instance.gameConnection.connected).toBe(true);
     expect(instance.gameConnection.port).toBe(fake.port);
   });
@@ -112,16 +86,50 @@ describe('game interaction connection', () => {
   it('gives up without connecting when an ephemeral port is never announced', async () => {
     fake = await startFakeGame({ pid: 4242 });
     const proc = makeProc(instance, 4242, null, 0);
-    await instance.connectToGame('/fake/project', proc);
+    const result = await instance.connectToGame('/fake/project', proc);
+    expect(result).toMatchObject({ connected: false, reason: 'no-port', port: null, attempts: 0 });
     expect(instance.gameConnection.connected).toBe(false);
     expect(fake.received).toHaveLength(0);
+  });
+
+  it('reports an unreachable server when nothing listens on the announced port', async () => {
+    fake = await startFakeGame({ pid: 4242 });
+    const closedPort = fake.port;
+    await stopFakeGame(fake);
+    fake = null;
+    const proc = makeProc(instance, 4242, closedPort, 0);
+    const result = await instance.connectToGame('/fake/project', proc, Date.now() + 1200);
+    expect(result).toMatchObject({ connected: false, reason: 'unreachable', port: closedPort });
+    expect(result.attempts).toBeGreaterThanOrEqual(2);
+    expect(instance.gameConnection.connected).toBe(false);
   });
 
   it('aborts when the game exits before announcing a port', async () => {
     const proc = makeProc(instance, 4242, null, 0);
     const pending = instance.connectToGame('/fake/project', proc);
     instance.activeProcess = null;
-    await pending;
+    const result = await pending;
+    expect(result).toMatchObject({ connected: false, reason: 'superseded' });
     expect(instance.gameConnection.connected).toBe(false);
+  });
+
+  it('wakes up as soon as a tracked process exits', async () => {
+    let settle: (value: unknown) => void = () => {};
+    const proc: any = makeProc(instance, 4242, null, 0);
+    proc.exit = new Promise(resolve => {
+      settle = resolve;
+    });
+    proc.portAnnounced = new Promise(() => {});
+    const started = Date.now();
+    const pending = instance.connectToGame('/fake/project', proc, Date.now() + 10000);
+    setTimeout(() => {
+      proc.exited = true;
+      proc.exitCode = 3;
+      settle({ code: 3, signal: null });
+    }, 50);
+    const result = await pending;
+    expect(result).toMatchObject({ connected: false, reason: 'exited' });
+    expect(result.message).toContain('code 3');
+    expect(Date.now() - started).toBeLessThan(2000);
   });
 });
